@@ -271,6 +271,7 @@ class StreamingSerialRuntime(AbstractDevice):
             **values,
         }
         self._writer.writerow(row)
+        self.register_saved_samples(1)
         self._file.flush()
         if now - self._last_fsync >= 5.0:
             os.fsync(self._file.fileno())
@@ -446,19 +447,30 @@ class DeviceManagerDialog(QDialog):
         if not hasattr(app, "generic_serial_devices"):
             app.generic_serial_devices = {}
 
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 12)
         self.table.setHorizontalHeaderLabels(
-            ["Enabled", "Name", "Type", "Connection", "Reads", "Last Read", "Last error"]
+            [
+                "Enabled",
+                "Name",
+                "Type",
+                "Connection",
+                "Reads",
+                "Run Reads",
+                "Read Hz",
+                "Saved Samples",
+                "Save Hz",
+                "Last Read",
+                "Last Save",
+                "Last Error",
+            ]
         )
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents,)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents,)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents,)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents,)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents,)
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents,)
-        header.setSectionResizeMode(6, QHeaderView.Stretch,)
-        
+        for column in range(11):
+            header.setSectionResizeMode(
+                column,
+                QHeaderView.ResizeToContents,
+            )
+        header.setSectionResizeMode(11, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.doubleClicked.connect(self.edit_selected)
@@ -513,66 +525,52 @@ class DeviceManagerDialog(QDialog):
         for row_index, (name, device_type, device) in enumerate(rows):
             if device_type == "Alicat MFC":
                 registry = self._registry()
-
-                runtime = (
-                    registry.get(name)
-                    if registry is not None
-                    else None
-                )
-
-                snapshot = (
-                    runtime.snapshot()
-                    if runtime is not None
-                    else None
-                )
-
-                if snapshot is None:
-                    connection = DeviceState.DISCONNECTED.value
-                    reads = "0"
-                    last_read = "-"
-                    error = ""
-                else:
-                    connection = snapshot.state.value
-                    reads = str(snapshot.sequence)
-
-                    age = snapshot.age_seconds()
-
-                    last_read = (
-                        "-"
-                        if age is None
-                        else f"{age:.1f} s ago"
-                    )
-
-                    error = snapshot.error or ""
-
+                runtime = registry.get(name) if registry is not None else None
+                snapshot = runtime.snapshot() if runtime is not None else None
                 enabled = True
-
             else:
                 snapshot = device.snapshot()
-
-                connection = snapshot.state.value
-                reads = str(snapshot.sequence)
-
-                age = snapshot.age_seconds()
-
-                last_read = (
-                    "-"
-                    if age is None
-                    else f"{age:.1f} s ago"
-                )
-
-                error = snapshot.error or ""
                 enabled = device.config.enabled
 
-            values = (
-                "Yes" if enabled else "No",
-                name,
-                device_type,
-                connection,
-                reads,
-                last_read,
-                error,
-            )
+            if snapshot is None:
+                values = (
+                    "Yes" if enabled else "No",
+                    name,
+                    device_type,
+                    DeviceState.DISCONNECTED.value,
+                    "0",
+                    "0",
+                    "0.000",
+                    "0",
+                    "0.000",
+                    "-",
+                    "-",
+                    "",
+                )
+            else:
+                read_age = snapshot.age_seconds()
+                last_read = (
+                    "-" if read_age is None else f"{read_age:.1f} s ago"
+                )
+                last_save = (
+                    "-"
+                    if snapshot.last_save_local is None
+                    else snapshot.last_save_local[11:19]
+                )
+                values = (
+                    "Yes" if enabled else "No",
+                    name,
+                    device_type,
+                    snapshot.state.value,
+                    str(snapshot.sequence),
+                    str(snapshot.run_sequence),
+                    f"{snapshot.read_frequency_hz:.3f}",
+                    str(snapshot.saved_samples_this_run),
+                    f"{snapshot.sample_save_frequency_hz:.3f}",
+                    last_read,
+                    last_save,
+                    snapshot.error or "",
+                )
 
             for column_index, value in enumerate(values):
                 self.table.setItem(

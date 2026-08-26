@@ -42,8 +42,6 @@ from PySide6.QtCore import QTimer
 
 from .acquisition_legacy import application as _LegacyApplication
 from .acquisition_legacy import (
-    CreateDAQTask,
-    NIAOtab,
     create_dash_app,
     error_logger,
     firepydaq_logger,
@@ -188,6 +186,14 @@ class _ChunkWriter:
 
 
 class application(_LegacyApplication):
+    def _write_device_health_from_registry(self):
+        """Persist every registered AbstractDevice from current snapshots."""
+        manager = getattr(self, "device_health", None)
+        registry = getattr(self, "device_registry", None)
+        if manager is None or registry is None:
+            return
+        manager.write_registry(registry)
+
     """Drop-in legacy GUI subclass with bounded-memory, disk-backed recording."""
 
     def __init__(self):
@@ -289,6 +295,9 @@ class application(_LegacyApplication):
                     parquet_writer.close()
                     parquet_writer = None
                 os.replace(temporary_path, final_path)
+
+                for device in self.device_registry.devices():
+                    device.stop_run()
 
                 csv_path = final_path.with_suffix(".csv")
                 try:
@@ -471,14 +480,14 @@ class application(_LegacyApplication):
                     elif fill < 0.50:
                         self.queue_warning_75_sent = False
                         self.queue_warning_90_sent = False
-                    if not self._writer.put(block):
+                    success = self._writer.put(block)
+                    if success:
+                        self.NIDAQ_Device.register_saved_samples(len(block.elapsed_s))
+                        if self.manifest is not None:
+                            self.manifest.update_chunk(len(block.elapsed_s))
+                    else:
                         self.save_bool = False
                         self.ContinueAcquisition = False
-                    else:
-                        if self.manifest is not None:
-                            self.manifest.update_chunk(
-                                len(block.elapsed_s)
-                            )
 
                 self.xdata = self._append_dashboard_buffer(self.xdata, self.xdata_new)
                 self.ydata = self._append_dashboard_buffer(self.ydata, self.ydata_new)
@@ -531,7 +540,7 @@ class application(_LegacyApplication):
                     ):
                     self.device_health.update_stale_states()
 
-                    self.device_health.write()
+                    self._write_device_health_from_registry()
 
                     self.last_device_health_write = (
                         time.monotonic()
@@ -574,6 +583,8 @@ class application(_LegacyApplication):
         if self.save_button.isChecked():
             self.save_button.setText("Stop")
             self.save_bool = True
+            for device in self.device_registry.devices():
+                device.start_run()
             self.run_counter = 0
             self.set_up()
 
@@ -818,6 +829,9 @@ class application(_LegacyApplication):
             }
             if writer.put(name, writer_snapshot, elapsed_s):
                 self._serial_last_saved_sequence[name] = snapshot.sequence
+                device = self.device_registry.get(name)
+                if device is not None:
+                    device.register_saved_samples(1)
 
     def _stop_serial_workers(self):
         try:
@@ -826,4 +840,5 @@ class application(_LegacyApplication):
             firepydaq_logger.warning("Device stop warning: %s", exc)
         finally:
             self._serial_workers_started = False
+        self._write_device_health_from_registry()
 

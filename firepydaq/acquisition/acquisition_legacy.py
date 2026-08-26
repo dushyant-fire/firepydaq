@@ -62,10 +62,10 @@ import os
 from pathlib import Path
 
 # NI related
-from .NIAOtab import NIAOtab
-from ..api.EchoNIDAQTask import CreateDAQTask
+from .ni_device import NIDaqDevice
 
 from .abstract_device import DeviceState
+from .device_registry import DeviceRegistry
 
 # Error handling
 import traceback
@@ -101,8 +101,8 @@ class application(QMainWindow):
         """
 
         # Set window properties
-        self.setGeometry(0, 0, 900, 650)
-        self.resize(1180, 650)
+        self.setGeometry(0, 0, 900, 700)
+        self.resize(1180, 700)
         self.setMinimumSize(760, 520)
         self.setWindowTitle("Facilitated Interface for Recording Experiments (FIRE)")  # noqa: E501
         self.menu = MainMenu(self)
@@ -932,14 +932,13 @@ class application(QMainWindow):
                 del self.NIDAQ_Device
 
             try:
-                self.NIDAQ_Device = CreateDAQTask(self, "NI Task")
+                self.NIDAQ_Device = NIDaqDevice(self, "NI Task")
                 self.NIDAQ_Device.CreateFromConfig(self.settings["Config File"])  # noqa: E501
 
                 if self.NIDAQ_Device.ai_counter > 0:
                     sample_rate = int(self.settings["Sampling Rate"])
                     self.NIDAQ_Device.StartAIContinuousTask(sample_rate, sample_rate)  # noqa: E501
                 if self.NIDAQ_Device.ao_counter > 0:
-                    self.niaotab = NIAOtab(self, self.NIDAQ_Device.aolabel_map)
                     AO_initials = np.array([0 for i in self.NIDAQ_Device.aolabel_map.keys()], dtype=np.float64)  # noqa: E501
                     self.NIDAQ_Device.StartAOContinuousTask(AO_initials=AO_initials)  # noqa: E501
             except Exception:

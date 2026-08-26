@@ -42,7 +42,7 @@ DEFAULT_CATEGORIES = (
 
 
 class OperatorEventLogger:
-    """Thread-safe, append-only operator event CSV writer."""
+    """Thread-safe, append-only operator-event CSV writer."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -66,7 +66,9 @@ class OperatorEventLogger:
         with self._lock:
             if self._output_path != output_path:
                 self._output_path = output_path
-                self._next_event_number = self._read_next_event_number(output_path)
+                self._next_event_number = self._read_next_event_number(
+                    output_path
+                )
             self._origin_monotonic = origin_monotonic
 
         return output_path
@@ -141,62 +143,69 @@ class OperatorEventLogger:
 
 
 class EventDraftRow(QFrame):
-    save_requested = Signal(object)
-    remove_requested = Signal(object)
+    """One unsaved event draft with a permanent creation identity."""
 
-    def __init__(self, parent=None) -> None:
+    saved = Signal(object)
+    removed = Signal(object)
+
+    def __init__(self, draft_id: int, parent=None) -> None:
         super().__init__(parent)
+        self.draft_id = draft_id
+        self.created_local = datetime.now().astimezone()
+        self.created_monotonic = time.monotonic()
+
         self.setFrameShape(QFrame.StyledPanel)
 
-        self.draft_label = QLabel("Draft")
-        self.draft_label.setMinimumWidth(56)
+        creation_time = self.created_local.strftime("%H:%M:%S")
+        self.draft_label = QLabel(
+            f"Event {self.draft_id}  {creation_time}"
+        )
+        self.draft_label.setMinimumWidth(130)
         self.draft_label.setStyleSheet(
             "font-weight: 700; color: #4f5961;"
         )
+        self.draft_label.setToolTip(
+            "Event draft opened: "
+            + self.created_local.isoformat(timespec="seconds")
+        )
 
-        self.category_input = QComboBox()
-        self.category_input.addItems(DEFAULT_CATEGORIES)
+        self.category = QComboBox()
+        self.category.addItems(DEFAULT_CATEGORIES)
 
-        self.message_input = QLineEdit()
-        self.message_input.setPlaceholderText("Describe the operator event")
+        self.message = QLineEdit()
+        self.message.setPlaceholderText("Describe the operator event")
 
         self.save_button = QPushButton("Save")
         self.remove_button = QPushButton("Remove")
         self.save_button.setMaximumWidth(58)
-        self.remove_button.setMaximumWidth(70)
+        self.remove_button.setMaximumWidth(68)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(5, 3, 5, 3)
         layout.setSpacing(5)
         layout.addWidget(self.draft_label)
-        layout.addWidget(self.category_input)
-        layout.addWidget(self.message_input, 1)
+        layout.addWidget(self.category)
+        layout.addWidget(self.message, 1)
         layout.addWidget(self.save_button)
         layout.addWidget(self.remove_button)
 
-        self.save_button.clicked.connect(
-            lambda: self.save_requested.emit(self)
-        )
-        self.remove_button.clicked.connect(
-            lambda: self.remove_requested.emit(self)
-        )
-        self.message_input.returnPressed.connect(
-            lambda: self.save_requested.emit(self)
-        )
-
-    def set_draft_number(self, number: int) -> None:
-        self.draft_label.setText(f"Draft {number}")
+        self.save_button.clicked.connect(lambda: self.saved.emit(self))
+        self.remove_button.clicked.connect(lambda: self.removed.emit(self))
+        self.message.returnPressed.connect(lambda: self.saved.emit(self))
 
     def set_busy(self, busy: bool) -> None:
         enabled = not busy
-        self.category_input.setEnabled(enabled)
-        self.message_input.setEnabled(enabled)
-        self.save_button.setEnabled(enabled)
-        self.remove_button.setEnabled(enabled)
+        for widget in (
+            self.category,
+            self.message,
+            self.save_button,
+            self.remove_button,
+        ):
+            widget.setEnabled(enabled)
 
 
 class OperatorEventsWidget(QWidget):
-    """Structured operator events with multiple numbered drafts."""
+    """Multiple operator-event drafts with stable IDs and creation times."""
 
     event_saved = Signal(dict)
     event_file_changed = Signal(str)
@@ -204,9 +213,9 @@ class OperatorEventsWidget(QWidget):
     def __init__(
         self,
         operator_getter: Callable[[], str],
-        output_prefix_getter: Callable[[], Optional[str | Path]],
-        elapsed_origin_getter: Callable[[], Optional[float]],
-        notify: Callable[[str, str], None],
+        output_prefix_getter,
+        elapsed_origin_getter,
+        notify,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -216,6 +225,7 @@ class OperatorEventsWidget(QWidget):
         self.notify = notify
         self.logger = OperatorEventLogger()
         self._drafts: list[EventDraftRow] = []
+        self._next_draft_id = 1
 
         title = QLabel("Operator Events")
         title.setStyleSheet("font-weight: 600;")
@@ -226,8 +236,8 @@ class OperatorEventsWidget(QWidget):
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.path_label.setWordWrap(False)
 
-        add_button = QPushButton("Add draft")
-        add_button.setMaximumWidth(84)
+        add_button = QPushButton("Log Event")
+        add_button.setMaximumWidth(82)
         add_button.clicked.connect(self.add_draft)
 
         header_layout = QHBoxLayout()
@@ -241,44 +251,39 @@ class OperatorEventsWidget(QWidget):
         self.draft_layout.setSpacing(3)
         self.draft_layout.addStretch()
 
-        draft_scroll = QScrollArea()
-        draft_scroll.setWidgetResizable(True)
-        draft_scroll.setWidget(self.draft_container)
-        draft_scroll.setMinimumHeight(64)
-        draft_scroll.setMaximumHeight(124)
-        draft_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.draft_container)
+        scroll.setMinimumHeight(64)
+        scroll.setMaximumHeight(124)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 2, 0, 0)
         layout.setSpacing(3)
         layout.addLayout(header_layout)
         layout.addWidget(self.path_label)
-        layout.addWidget(draft_scroll)
-
-        self.add_draft()
+        layout.addWidget(scroll)
 
     def configure_for_current_test(self) -> Path:
         output_prefix = self.output_prefix_getter()
         if output_prefix is None:
             raise RuntimeError("The current test output path is not available.")
 
-        output_path = self.logger.configure(
+        path = self.logger.configure(
             output_prefix,
             self.elapsed_origin_getter(),
         )
-
-        self.event_file_changed.emit(
-            self._relative_data_path(output_path)
-        )
-        relative_path = self._relative_data_path(output_path)
+        relative_path = self._relative_path(path)
         self.path_label.setText(relative_path)
-        self.path_label.setToolTip(str(output_path))
-        self.path_label.update()
+
         self.event_file_changed.emit(relative_path)
-        return output_path
+
+        self.path_label.setToolTip(str(path))
+        return path
 
     @staticmethod
-    def _relative_data_path(path: Path) -> str:
+    def _relative_path(path: Path) -> str:
         parts = path.parts
         for index, part in enumerate(parts):
             normalized = part.lower().replace("_", "").replace("-", "")
@@ -286,50 +291,38 @@ class OperatorEventsWidget(QWidget):
                 "experimentdata" in normalized
                 or "calibrationdata" in normalized
             ):
-                remainder = parts[index + 1 :]
-                return str(Path(*remainder)) if remainder else path.name
-
+                return str(Path(*parts[index + 1 :]))
         return str(Path(path.parent.name) / path.name)
 
     def add_draft(self) -> None:
-        draft = EventDraftRow(self)
-        draft.save_requested.connect(self._save_draft)
-        draft.remove_requested.connect(self._remove_draft)
+        draft = EventDraftRow(
+            draft_id=self._next_draft_id,
+            parent=self,
+        )
+        self._next_draft_id += 1
+
+        draft.saved.connect(self._save_draft)
+        draft.removed.connect(self._remove_draft)
         self._drafts.append(draft)
         self.draft_layout.insertWidget(
             self.draft_layout.count() - 1,
             draft,
         )
-        self._renumber_drafts()
-        draft.message_input.setFocus()
-
-    def _renumber_drafts(self) -> None:
-        for index, draft in enumerate(self._drafts, start=1):
-            draft.set_draft_number(index)
+        draft.message.setFocus()
 
     def _remove_draft(self, draft: EventDraftRow) -> None:
         if draft in self._drafts:
             self._drafts.remove(draft)
-        draft.setParent(None)
         draft.deleteLater()
-
-        if not self._drafts:
-            self.add_draft()
-        else:
-            self._renumber_drafts()
-
-        self.draft_container.adjustSize()
-        self.draft_container.updateGeometry()
-        self.updateGeometry()
 
     def _save_draft(self, draft: EventDraftRow) -> None:
         draft.set_busy(True)
         try:
             self.configure_for_current_test()
             row = self.logger.append(
-                operator=self.operator_getter(),
-                category=draft.category_input.currentText(),
-                message=draft.message_input.text(),
+                self.operator_getter(),
+                draft.category.currentText(),
+                draft.message.text(),
             )
         except Exception as exc:
             draft.set_busy(False)
@@ -340,12 +333,11 @@ class OperatorEventsWidget(QWidget):
             )
             return
 
-        # Emit while the widget and signal connections are still alive.
-        self.event_saved.emit(dict(row))
+        if draft in self._drafts:
+            self._drafts.remove(draft)
+        draft.deleteLater()
 
-        # Remove the saved draft, then retain one empty draft if needed.
-        self._remove_draft(draft)
-
+        self.event_saved.emit(row)
         self.notify(
             f"Operator event {row['EventNumber']} saved: {row['Message']}",
             "observation",
