@@ -1,0 +1,159 @@
+/* Compact two-card FIREpyDAQ Home page. */
+
+.home-compact-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    width: 100%;
+    padding: 4px 2px 22px;
+    text-align: left;
+}
+
+.home-kicker {
+    display: block;
+    margin-bottom: 7px;
+    color: var(--fp-primary);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+}
+
+.home-test-title {
+    max-width: 760px;
+    margin: 0 !important;
+    overflow: hidden;
+    color: var(--fp-text) !important;
+    font-size: clamp(22px, 2.2vw, 32px) !important;
+    line-height: 1.15;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.home-live-pill {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    color: #157347;
+    background: #e8f6ef;
+    border: 1px solid #b9e2cf;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+}
+
+.home-live-dot {
+    width: 8px;
+    height: 8px;
+    background: #21a366;
+    border-radius: 50%;
+}
+
+.home-metric-grid {
+    display: grid;
+    gap: 12px;
+    width: 100%;
+}
+
+.home-metric-grid-two {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.home-metric-card {
+    min-width: 0;
+    min-height: 112px;
+    padding: 17px 18px;
+    background: var(--fp-surface-soft);
+    border: 1px solid var(--fp-border);
+    border-radius: 8px;
+    text-align: left;
+}
+
+.home-metric-label {
+    display: block;
+    margin-bottom: 10px;
+    color: var(--fp-muted);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+}
+
+.home-metric-value {
+    display: block;
+    color: var(--fp-text);
+    font-size: clamp(25px, 2.2vw, 32px);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.05;
+}
+
+.home-metric-note {
+    display: block;
+    margin-top: 8px;
+    color: var(--fp-muted);
+    font-size: 12px;
+}
+
+.home-advanced {
+    width: 100%;
+    margin-top: 14px;
+    overflow: hidden;
+    background: var(--fp-surface);
+    border: 1px solid var(--fp-border);
+    border-radius: 8px;
+    text-align: left;
+}
+
+.home-advanced summary {
+    padding: 14px 16px;
+    color: var(--fp-text);
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    user-select: none;
+}
+
+.home-advanced[open] summary {
+    border-bottom: 1px solid var(--fp-border);
+}
+
+.home-detail-list { padding: 3px 16px; }
+
+.home-detail-row {
+    display: grid;
+    grid-template-columns: 130px minmax(0, 1fr);
+    gap: 16px;
+    align-items: center;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--fp-border);
+}
+
+.home-detail-row:last-child { border-bottom: 0; }
+.home-detail-label { color: var(--fp-muted); font-size: 12px; font-weight: 700; }
+
+.home-detail-path {
+    overflow: hidden;
+    padding: 7px 9px;
+    color: var(--fp-muted);
+    background: var(--fp-surface-soft);
+    border-radius: 5px;
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sub-layout:has(.home-compact-header),
+.sub-layout-:has(.home-compact-header) {
+    max-width: 960px;
+    min-height: 0 !important;
+    padding: 30px !important;
+}
+
+@media (max-width: 700px) {
+    .home-compact-header { align-items: flex-start; flex-direction: column; }
+    .home-metric-grid-two { grid-template-columns: 1fr; }
+    .home-detail-row { grid-template-columns: 1fr; gap: 6px; }
+}

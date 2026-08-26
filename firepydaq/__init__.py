@@ -1,4 +1,6 @@
-# read version from installed package
-from importlib.metadata import version
-__version__ = version("firepydaq")
-print("Importing FIREpyDAQ v."+__version__)
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("firepydaq")
+except PackageNotFoundError:
+    __version__ = "0.0.0-dev"

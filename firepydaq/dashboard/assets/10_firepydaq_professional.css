@@ -1,0 +1,256 @@
+/* FIREpyDAQ dashboard visual refresh
+   Front-end styling only. No page-generation, callback, or data-flow changes. */
+
+:root {
+    --fp-bg: #f4f7fb;
+    --fp-surface: #ffffff;
+    --fp-surface-soft: #f8fafc;
+    --fp-border: #dce3ec;
+    --fp-border-strong: #cbd5e1;
+    --fp-text: #172033;
+    --fp-muted: #64748b;
+    --fp-primary: #1769aa;
+    --fp-primary-hover: #0f568f;
+    --fp-primary-soft: #eaf3fb;
+    --fp-shadow: 0 10px 30px rgba(23, 32, 51, 0.08);
+    --fp-shadow-soft: 0 3px 12px rgba(23, 32, 51, 0.06);
+    --fp-radius: 10px;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    min-height: 100%;
+    background: var(--fp-bg) !important;
+    color: var(--fp-text) !important;
+    font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+}
+
+body {
+    letter-spacing: 0.005em;
+}
+
+/* Header */
+.titlebar {
+    background: rgba(255, 255, 255, 0.98) !important;
+    border-bottom: 1px solid var(--fp-border) !important;
+    box-shadow: 0 2px 10px rgba(23, 32, 51, 0.04) !important;
+}
+
+.titlebar-head {
+    color: var(--fp-text) !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.02em;
+}
+
+.titlebar-tool,
+.titlebar-cont {
+    background: transparent !important;
+}
+
+.titlebar-btn,
+#snapshot,
+#pause-play {
+    background: var(--fp-surface) !important;
+    border: 1px solid var(--fp-border-strong) !important;
+    border-radius: 7px !important;
+    box-shadow: none !important;
+    transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.titlebar-btn:hover,
+#snapshot:hover,
+#pause-play:hover {
+    background: var(--fp-primary-soft) !important;
+    border-color: var(--fp-primary) !important;
+    transform: translateY(-1px);
+}
+
+.titlebar-btn:focus-visible,
+#snapshot:focus-visible,
+#pause-play:focus-visible,
+.button:focus-visible {
+    outline: 3px solid rgba(23, 105, 170, 0.2) !important;
+    outline-offset: 2px;
+}
+
+#snap,
+#play,
+#light,
+#dark {
+    opacity: 0.78;
+}
+
+/* Sidebar */
+.sidebar {
+    background: var(--fp-surface) !important;
+    border: 1px solid var(--fp-border) !important;
+    border-radius: var(--fp-radius) !important;
+    box-shadow: var(--fp-shadow-soft) !important;
+}
+
+.button {
+    color: var(--fp-text) !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    border-radius: 7px !important;
+    font-family: inherit !important;
+    font-weight: 600 !important;
+    letter-spacing: 0 !important;
+    cursor: pointer;
+    transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.button:hover {
+    color: var(--fp-primary) !important;
+    background: var(--fp-primary-soft) !important;
+    border-color: #c9e0f2 !important;
+}
+
+.button:active,
+.button[aria-pressed="true"] {
+    color: #ffffff !important;
+    background: var(--fp-primary) !important;
+    border-color: var(--fp-primary) !important;
+}
+
+/* Main page and generated chart cards */
+.main-layout {
+    background: transparent !important;
+}
+
+.sub-layout,
+.sub-layout- {
+    background: var(--fp-surface) !important;
+    border: 1px solid var(--fp-border) !important;
+    border-radius: var(--fp-radius) !important;
+    box-shadow: var(--fp-shadow) !important;
+    color: var(--fp-text) !important;
+}
+
+.sub-layout h1,
+.sub-layout h2,
+.sub-layout h3,
+.sub-layout- h1,
+.sub-layout- h2,
+.sub-layout- h3 {
+    color: var(--fp-text) !important;
+    font-family: inherit !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.02em;
+}
+
+.sub-layout p,
+.sub-layout- p {
+    color: var(--fp-muted) !important;
+    line-height: 1.55;
+}
+
+/* Plotly graph frame. Plot layout remains generated from the CSV. */
+.graphs,
+.js-plotly-plot,
+.plot-container,
+.svg-container {
+    border-radius: 8px !important;
+}
+
+.graphs {
+    background: var(--fp-surface) !important;
+    overflow: hidden;
+}
+
+.modebar {
+    background: rgba(255, 255, 255, 0.94) !important;
+    border: 1px solid var(--fp-border) !important;
+    border-radius: 6px !important;
+    box-shadow: 0 2px 8px rgba(23, 32, 51, 0.08) !important;
+    padding: 2px !important;
+}
+
+.modebar-btn path {
+    fill: #526176 !important;
+}
+
+.modebar-btn:hover path {
+    fill: var(--fp-primary) !important;
+}
+
+/* Home page file information */
+.info-container {
+    background: var(--fp-surface-soft) !important;
+    border: 1px solid var(--fp-border) !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+}
+
+.sub-info {
+    background: var(--fp-surface) !important;
+    border: 1px solid var(--fp-border) !important;
+    border-left: 4px solid var(--fp-primary) !important;
+    border-radius: 7px !important;
+    box-shadow: none !important;
+    color: var(--fp-muted) !important;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.sub-info span:first-child,
+.sub-info strong {
+    color: var(--fp-text) !important;
+    font-weight: 700 !important;
+}
+
+/* Controls */
+input,
+select,
+textarea {
+    color: var(--fp-text) !important;
+    background: var(--fp-surface) !important;
+    border: 1px solid var(--fp-border-strong) !important;
+    border-radius: 6px !important;
+    font-family: inherit !important;
+}
+
+/* Clean scrollbar without affecting page structure */
+* {
+    scrollbar-color: #b8c4d2 transparent;
+    scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+    background: #b8c4d2;
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+/* Dark-mode variables used by the existing switch callback. */
+html[style*="--bg: #181818"] body {
+    --fp-bg: #111827;
+    --fp-surface: #182235;
+    --fp-surface-soft: #202c40;
+    --fp-border: #334155;
+    --fp-border-strong: #475569;
+    --fp-text: #e5edf7;
+    --fp-muted: #a9b7c9;
+    --fp-primary: #4ea2df;
+    --fp-primary-hover: #65b4ea;
+    --fp-primary-soft: #1d3850;
+    --fp-shadow: 0 10px 30px rgba(0, 0, 0, 0.24);
+    --fp-shadow-soft: 0 3px 12px rgba(0, 0, 0, 0.2);
+}

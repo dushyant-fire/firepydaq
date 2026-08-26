@@ -31,6 +31,8 @@ from .SaveSettingsDialog import SaveSettingsDialog
 from .LoadSettingsDialog import LoadSettingsDialog
 from .schema import schema
 from .display_data_tab import data_vis
+from .SerialConfigPersistence import restore_serial_devices
+from .DeviceManager import install_device_manager
 
 from .device import alicat_mfc
 from .device import mfm
@@ -72,6 +74,16 @@ class MainMenu(QMenuBar):
         self.exit_action.triggered.connect(self.parent.safe_exit)
         self.file_menu.addAction(self.exit_action)
         self.exit_action.setShortcut("Alt+X")
+
+        # Central device manager. Legacy add/remove menus remain available
+        # during migration so existing configuration loading is not broken.
+        self.devices_menu = self.addMenu("Devices")
+        self.manage_devices_action = QAction("Open Device Manager", self)
+        self.manage_devices_action.setShortcut("Ctrl+D")
+        self.manage_devices_action.triggered.connect(
+            lambda: install_device_manager(self.parent)
+        )
+        self.devices_menu.addAction(self.manage_devices_action)
 
         # Add Devices Menu Button
         self.add_devices_menu = self.addMenu("Add Devices")
@@ -532,6 +544,7 @@ class MainMenu(QMenuBar):
                     self.parent.device_arr[mfc] = alicat_mfc(self.parent, self.parent.device_tab_widget, mfc)  # noqa E501
                     self.parent.device_arr[mfc].load_device_data(my_dict["Gas"], str(my_dict["Rate"]), my_dict["COMPORT"])  # noqa E501
                     self.parent.mfcs[mfc] = self.parent.device_arr[mfc]
+            restore_serial_devices(self.parent, dev_dict)
 
     def _repopulate_settings(self, data):
         self.parent.settings["Name"] = data["Name"]

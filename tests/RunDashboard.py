@@ -1,4 +1,11 @@
 if __name__ == '__main__':
+    from pathlib import Path
+    import sys
+
+    ROOT = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(ROOT))
+
+    from firepydaq.dashboard.app import create_dash_app
     from firepydaq.dashboard.app import create_dash_app
 
 create_dash_app(datapath="Example_ExpData/20240612_1717_ExampleFireData_Testing_Dushyant.parquet",  # noqa E501

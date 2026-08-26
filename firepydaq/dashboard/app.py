@@ -1,435 +1,324 @@
-##########################################################################
-# FIREpyDAQ - Facilitated Interface for Recording Experiments,
-# a python-package for Data Acquisition.
-# Copyright (C) 2024  Dushyant M. Chaudhari
+from __future__ import annotations
 
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-#########################################################################
-
-from dash import dcc, html, Input, Output, Dash, ctx, ALL
-import dash_daq as daq
-import plotly.graph_objects as go
+import atexit
 import json
-from plotly.subplots import make_subplots
-import numpy as np
-import os
-from ..utilities.PostProcessing import PostProcessData
-from threading import Timer
-import webbrowser
 import logging
+import webbrowser
 from logging.handlers import RotatingFileHandler
-from contextlib import redirect_stdout
+from pathlib import Path
+from threading import Timer
+import time
+import dash_daq as daq
+import numpy as np
+import polars as pl
+import pandas as pd
+import plotly.graph_objects as go
+from dash import ALL, Dash, Input, Output, ctx, dcc, html, no_update
+from plotly.subplots import make_subplots
+
+from ..dashboard.raw_stream import RawDataSubscriber
+from .home_page import make_home_page
+from ..utilities.firepydaq_path import (
+        get_firepydaq_dir,
+        get_active_run_dir,
+    )
+
+FIREPYDAQ_DIR = get_firepydaq_dir()
+REFRESH_MS = 1000
+MAX_PLOT_POINTS = 2000
+DASHBOARD_PORT = 1222
+LOGGER = logging.getLogger(__name__)
+
+
+def _first(settings, *names, default=""):
+    normalized = {str(k).strip().lower().replace("_", " "): v for k, v in settings.items()}
+    for name in names:
+        key = name.strip().lower().replace("_", " ")
+        value = normalized.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return default
+
+
+def _resolve_path(value, base_dir):
+    if not value:
+        return ""
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    return str(path.resolve())
+
+
+def _load_paths(kwargs):
+    settings = {}
+    json_path = kwargs.get("jsonpath")
+    base_dir = Path.cwd()
+    if json_path:
+        json_path = Path(json_path).expanduser().resolve()
+        base_dir = json_path.parent
+        with json_path.open("r", encoding="utf-8") as stream:
+            settings = json.load(stream)
+
+    config_path = kwargs.get("configpath") or _first(
+        settings, "Configuration File", "Configuration Path", "Config File", "configpath"
+    )
+    formulae_path = kwargs.get("formulaepath") or _first(
+        settings, "Formulae File", "Formula File", "Formulae Path", "formulaepath"
+    )
+    data_path = kwargs.get("datapath") or _first(
+        settings, "Test Name"
+    )
+
+    config_path = _resolve_path(config_path, base_dir)
+    formulae_path = _resolve_path(formulae_path, base_dir)
+    data_path = _resolve_path(data_path, base_dir)
+
+    # Existing settings normally contain the intended final .parquet path. It is
+    # permitted not to exist while acquisition is running.
+    if data_path and not data_path.lower().endswith(".parquet"):
+        data_path += ".parquet"
+
+    chunk_dir = get_active_run_dir(
+        data_path
+    ).resolve()
+
+    if not config_path or not Path(config_path).is_file():
+        raise FileNotFoundError(f"Configuration file not found: {config_path or '<unset>'}")
+    return {
+        "jsonpath": str(json_path) if json_path else "",
+        "configpath": config_path,
+        "formulaepath": formulae_path,
+        "datapath": data_path,
+        "chunk_dir": chunk_dir,
+    }
+
+
+def _read_chart_info(config_path, formulae_path=""):
+    config = pl.read_csv(config_path, ignore_errors=True)
+    config.columns = [c.strip() for c in config.columns]
+    required = {"Chart", "Layout", "Position", "Label"}
+    missing = required.difference(config.columns)
+    if missing:
+        raise ValueError(f"Configuration is missing dashboard columns: {sorted(missing)}")
+    if "Legend" not in config.columns:
+        config = config.with_columns(pl.col("Label").alias("Legend"))
+    if "Processed_Unit" not in config.columns:
+        config = config.with_columns(pl.lit("").alias("Processed_Unit"))
+    return config.sort(["Chart", "Position"])
+
+
+def _decimate(x, y, max_points=MAX_PLOT_POINTS):
+    x = np.asarray(x)
+    y = np.asarray(y)
+    count = min(len(x), len(y))
+    if count == 0:
+        return np.asarray([]), np.asarray([])
+    x, y = x[-count:], y[-count:]
+    if count <= max_points:
+        return x, y
+    step = int(np.ceil(count / max_points))
+    return x[::step], y[::step]
 
 
 def create_dash_app(**kwargs):
-    """ Method to post process and visualise data on a dashboard
-    hosted on a web server.
+    paths = _load_paths(kwargs)
+    # print("=" * 80)
+    # print("CONFIG:", paths["configpath"])
+    # print("DATA:", paths["datapath"])
+    # print("CHUNKS:", paths["chunk_dir"])
+    # print("=" * 80)
+    chart_info = _read_chart_info(paths["configpath"], paths["formulaepath"])
 
-    Uses the same keyword argument/s as
-    :py:class:`firepydaq.utilities.PostProcessing.PostProcessData`
+    subscriber = RawDataSubscriber(
+        config_path=paths["configpath"],
+        formulae_path=paths["formulaepath"],
+        chunk_dir=paths["chunk_dir"],
+        max_seconds=300,
+        max_ui_hz=2,
+    )
+    subscriber.start()
+    atexit.register(subscriber.stop)
 
-
-    """
-    processed_obj = PostProcessData(**kwargs)
     app = Dash(__name__, suppress_callback_exceptions=True)
-    log = logging.getLogger('werkzeug')
-    open("DashboardError.log", "w").close()
-    handler = RotatingFileHandler('DashboardError.log', maxBytes=10000, backupCount=1)  # noqa E501
-    log.addHandler(handler)
-    log.setLevel(logging.DEBUG)
+    log_handler = RotatingFileHandler("DashboardError.log", maxBytes=100_000, backupCount=2)
+    log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logging.getLogger("werkzeug").addHandler(log_handler)
 
-    def make_layout(df):
-        """ Method that makes plot layouts for each chart types with layout
-        and positions.
+    charts = [str(v).strip() for v in chart_info["Chart"].unique().sort().to_list()]
 
-        Parameters
-        ----------
-        df: polars.DataFrame
-            `All_chart_info` DataFrame
-            from `PostPorcessData`
+    def blank_figure(chart):
+        rows = chart_info.filter(pl.col("Chart") == chart)
+        layout_count = max(int(v) for v in rows["Layout"].to_list())
+        figure = make_subplots(rows=layout_count, cols=1, shared_xaxes=True)
+        figure.update_layout(
+            title_text=f"{chart} Graphs",
+            uirevision=chart,
+            margin=dict(l=60, r=25, t=55, b=45),
+        )
+        figure.update_xaxes(title_text="Time (s)", row=layout_count, col=1)
+        return figure
 
-        """
-        # Stores plots to be rendered
-        plot_divs = []
-        rendered_plots = []
-
-        # Create and update new plots on the basis of a data frame
-        for i in range(len(df.select("Chart"))):
-            if df["Chart"][i] not in rendered_plots and df["Position"][i] == 1:
-                rendered_plots.append(df["Chart"][i])
-                fig = make_subplots(df["Layout"][i], 1)
-                fig.update_layout(title_text=df["Chart"][i] + " Graphs")
-                for j in range(df["Layout"][i]):
-                    fig.add_trace(go.Scatter(), row=j + 1, col=1)
-                plot_divs.append(html.Div(id={'type': 'plot-layout',
-                                              'index': df["Chart"][i]},
-                                          className='sub-layout',
-                                          style={'display': 'none'},
-                                          children=[
-                                              dcc.Graph(id={'type': 'graphs',
-                                                            'index': df["Chart"][i]},  # noqa E501
-                                                        figure=fig, className='graphs',  # noqa E501
-                                                        responsive=True,
-                                                        style={'height': '35vw',  # noqa E501
-                                                               'width': '50vw'
-                                                               }
-                                                        )
-                                                    ]
-                                          )
-                                 )
-
-        home_screen_info = html.Div(id="info_container",
-                                    className="info-container")
-        home_screen_widgets = []
-        # Add Home Screen to help users navigate
-        for item in processed_obj.path_dict.keys():
-            if item == "datapath":
-                home_div = html.Div([html.Span("Data File: ",
-                                               style={'color': 'black'}
-                                               ),
-                                    html.Br(),
-                                    html.Br(),
-                                    html.Span(processed_obj.path_dict[item])],
-                                    id="data-path", className="sub-info")
-                post_processed_file = processed_obj.path_dict[item].split(".parquet")[0] + "_PostProcessed.parquet"  # noqa E501
-            if item == "configpath":
-                home_div = html.Div([html.Span("Configuration File: ",
-                                               style={'color': 'black'}
-                                               ),
-                                    html.Br(),
-                                    html.Br(),
-                                    html.Span(processed_obj.path_dict[item])],
-                                    id="conf-path", className="sub-info")
-            if item == "formulaepath":
-                home_div = html.Div([html.Span("Formulae File: ",
-                                               style={'color': 'black'}
-                                               ),
-                                    html.Br(),
-                                    html.Br(),
-                                    html.Span(processed_obj.path_dict[item])],
-                                    id="form-path", className="sub-info")
-            home_screen_widgets.append(home_div)
-            home_screen_widgets.append(html.Br(className="info-br"))
-
-        home_div = html.Div([html.Span("Post Processed File: ",
-                                       style={'color': 'black'}
-                                       ),
-                            html.Br(),
-                            html.Br(),
-                            html.Span(post_processed_file)],
-                            id="post-path",
-                            className="sub-info")
-        home_screen_widgets.append(home_div)
-        home_screen_widgets.append(html.Br(className="info-br"))
-        home_screen_info.children = home_screen_widgets
-
-        plot_divs.append(html.Div(id={'type': 'plot-layout', 'index': 'Home'},
-                         className='sub-layout-', style={'display': 'block'},
-                         children=[html.H1("Welcome to your experiment dashboard.",  # noqa E501
-                                   id={'type': 'header', 'index': 'home'}),
-                                   html.P("Files path of the experiment " +
-                                          "under visualization:",
-                                          id={'type': 'paragraph', 'index': 'home'}),  # noqa E501
-                         home_screen_info]))
-
-        return html.Div(id='central-layout', className="main-layout",
-                        children=plot_divs)
-
-    def make_sidebar(buttons_list):
-        """
-        Method that makes a sidebar with appropriate buttons
-        """
-        # Stores buttons to render
-        button_divs = []
-
-        # Create button for each unique chart layout
-        for button_id in buttons_list:
-            button_divs.append(html.Button(button_id, id={'type': 'sidebar-btn', 'index': button_id},  # noqa E501
-                               className='button'))
-            button_divs.append(html.Br())
-
-        button_divs.append(html.Button('Home', id={'type': 'sidebar-btn', 'index': 'Home'},  # noqa E501
-                           className='button'))
-        return html.Div(id='sidebar', className='sidebar',
-                        children=button_divs)
-
-    def make_title():
-        """Method that creates a titlebar with features to
-        switch display modes, save graphs, and pause dashboarding
-        """
-        children_div = []
-        header = html.Div(id='titlebar-head',
-                          className='titlebar-head',
-                          children="FIREpydaq Dashboard")
-        children_div.append(header)
-        header = html.Div(id='titlebar-func', className='titlebar-tool',
-                          children=[html.Div(id='titlebar-snapshot-container',
-                                             className='titlebar-cont',
-                                             children=[
-                                                 html.Button(id='snapshot',
-                                                             title="Take All chart snapshots",  # noqa E501
-                                                             className='titlebar-btn',  # noqa E501
-                                                             children=html.Img(id="snap", src="/assets/icons8-graph-50.png")  # noqa E501
-                                                             )
-                                                       ]
-                                             ),
-                                    html.Br(className='titlebar-btn-space'),
-                                    html.Div(id='titlebar-play-container',
-                                             className='titlebar-cont',
-                                             children=[html.Button(id='pause-play',  # noqa E501
-                                                                   title = 'Pause/Play', 
-                                                                      className='titlebar-btn',  # noqa E501
-                                                                      children=html.Img(id="play", src="/assets/icons8-pause-48.png")  # noqa E501
-                                                                   )
-                                                       ]
-                                             ),
-                                    html.Br(className='titlebar-btn-space'),
-                                    html.Div(id='titlebar-display-container',
-                                             className='titlebar-cont',
-                                             children=[html.Img(id="light", src="/assets/icons8-sun-24.png"),  # noqa E501
-                                                       daq.BooleanSwitch(id='display-switch',  # noqa E501
-                                                                         className='titlebar-btn-toggle'),  # noqa E501
-                                                                         html.Img(id="dark", src="/assets/icons8-moon-24.png")  # noqa E501
-                                                       ]
-                                             )
-                                    ]
-                          )
-        children_div.append(header)
-        return html.Div(id='titlebar',
-                        className='titlebar',
-                        children=children_div
-                        )
+    dashboard_started_at = time.monotonic()
 
     def serve_layout():
-        """ Method that serves plot and application layouts from a data
-        frame based on processed data available from files given.
-        - First, it calls make_sidebar() to serve the sidebar from the charts
-        - Next, it calls make_layout() to give each plot layouts and to create
-            a home layout with information about files
-        - Finally, it calls make_title() to create the titlebar
-        """
-        # Obtain and read files
-        final_df = processed_obj.All_chart_info.sort("Chart")
+        sidebar = []
+        for chart in charts + ["Home"]:
+            sidebar.extend([
+                html.Button(chart, id={"type": "sidebar-btn", "index": chart}, className="button"),
+                html.Br(),
+            ])
 
-        # Creates buttons
-        buttons_list = np.unique(final_df.select("Chart").to_numpy().flatten())
-        sidebar = make_sidebar(buttons_list)
-        # Creates plot layouts
-        main_layout = make_layout(final_df)
+        plot_layouts = [
+            html.Div(
+                dcc.Graph(
+                    id={"type": "graphs", "index": chart},
+                    figure=blank_figure(chart),
+                    responsive=True,
+                    style={"height": "75vh", "width": "100%"},
+                ),
+                id={"type": "plot-layout", "index": chart},
+                className="sub-layout",
+                style={"display": "none"},
+            )
+            for chart in charts
+        ]
+        file_items = [
+            html.P([html.Strong("Configuration File: "), paths["configpath"]]),
+            html.P([html.Strong("Live Chunk Directory: "), str(paths["chunk_dir"])]),
+            html.P([html.Strong("Final Data File: "), paths["datapath"]]),
+        ]
+        if paths["formulaepath"]:
+            file_items.append(html.P([html.Strong("Formulae File: "), paths["formulaepath"]]))
+        # plot_layouts.append(
+        #     html.Div(
+        #         [html.H1("FIREpyDAQ experiment dashboard"), *file_items],
+        #         id={"type": "plot-layout", "index": "Home"},
+        #         className="sub-layout",
+        #         style={"display": "block"},
+        #     )
+        # )
 
-        title_bar = make_title()
-        interval = dcc.Interval(id="refresh", interval=1 * 3000, n_intervals=0)
-        para_div = html.Div(id='para', style={'display': 'none'})
-        return title_bar, sidebar, main_layout, interval, para_div  # noqa E501
+        plot_layouts.append(
+            html.Div(
+                make_home_page(paths, charts),
+                id={"type": "plot-layout", "index": "Home"},
+                className="sub-layout",
+                style={"display": "block"},
+            )
+        )
+
+        return html.Div([
+            html.Div([
+                html.Div("FIREpyDAQ Dashboard", className="titlebar-head"),
+                html.Div([
+                    html.Button(html.Img(id="snap", src="/assets/icons8-graph-50.png"), id="snapshot"),
+                    html.Button(html.Img(id="play", src="/assets/icons8-pause-48.png"), id="pause-play"),
+                    html.Img(id="light", src="/assets/icons8-sun-24.png"),
+                    daq.BooleanSwitch(id="display-switch"),
+                    html.Img(id="dark", src="/assets/icons8-moon-24.png"),
+                ], className="titlebar-tool"),
+            ], id="titlebar", className="titlebar"),
+            html.Div(sidebar, id="sidebar", className="sidebar"),
+            html.Div(plot_layouts, id="central-layout", className="main-layout"),
+            dcc.Interval(id="refresh", interval=REFRESH_MS, n_intervals=0),
+            html.Div(id="snapshot-status", style={"display": "none"}),
+        ])
 
     app.layout = serve_layout
 
+    @app.callback(
+        Output("home-runtime", "children"),
+        Input("refresh", "n_intervals"),
+    )
+    def update_home_runtime(_interval):
+        elapsed = max(0, int(time.monotonic() - dashboard_started_at))
+        hours, remainder = divmod(elapsed, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
+
     app.clientside_callback(
         """
-        function(data) {
-            if (data) {
-                document.documentElement.style.setProperty("--main-color", "#2b2b2c");
-                document.documentElement.style.setProperty("--bg", "#181818");
-                document.documentElement.style.setProperty("--highlight", "#167fca");
-                document.documentElement.style.setProperty("--hover", "#605F5F");
-                document.documentElement.style.setProperty("--txt", "#E5E4E2");
-            } else {
-                document.documentElement.style.setProperty("--main-color", "white");
-                document.documentElement.style.setProperty("--bg", "#f0f0f0");
-                document.documentElement.style.setProperty("--highlight", "#167fca");
-                document.documentElement.style.setProperty("--hover", "#c3c3c3");
-                document.documentElement.style.setProperty("--txt", "black");
-                return "#605F5Fs"
-            }
-            return "#167fca"
+        function(on) {
+            const r = document.documentElement;
+            const v = on
+              ? ['#2b2b2c','#181818','#167fca','#605f5f','#e5e4e2']
+              : ['white','#f0f0f0','#167fca','#c3c3c3','black'];
+            ['--main-color','--bg','--highlight','--hover','--txt'].forEach((k,i) => r.style.setProperty(k,v[i]));
+            return '#167fca';
         }
         """,
-        Output('display-switch', 'color'),
-        Input('display-switch', 'on')
+        Output("display-switch", "color"),
+        Input("display-switch", "on"),
     )
+
+    @app.callback(Output("play", "src"), Output("refresh", "disabled"), Input("pause-play", "n_clicks"))
+    def pause(clicks):
+        paused = bool(clicks and clicks % 2 == 1)
+        return ("/assets/icons8-play-50.png" if paused else "/assets/icons8-pause-48.png"), paused
 
     @app.callback(
-            Output('play', 'src'),
-            Output('refresh', 'disabled'),
-            Input('pause-play', 'n_clicks')
+        Output({"type": "plot-layout", "index": ALL}, "style"),
+        Input({"type": "sidebar-btn", "index": ALL}, "n_clicks"),
     )
-    def _switch_pictures(clicks):
-        print("Switch")
-        if clicks is None:
-            return "/assets/icons8-pause-48.png", False
-        if clicks % 2 == 0:
-            return "/assets/icons8-play-50.png", True
-        else:
-            return "/assets/icons8-pause-48.png", False
+    def navigate(_clicks):
+        selected = ctx.triggered_id.get("index", "Home") if isinstance(ctx.triggered_id, dict) else "Home"
+        return [{"display": "block"} if item == selected else {"display": "none"} for item in charts + ["Home"]]
+
+    @app.callback(Output({"type": "graphs", "index": ALL}, "figure"), Input("refresh", "n_intervals"))
+    def refresh(_interval):
+        snapshot = subscriber.snapshot()
+        # print(snapshot.keys())
+        figures = []
+        for chart in charts:
+            figure = blank_figure(chart)
+            if snapshot and "Time" in snapshot:
+                rows = chart_info.filter(pl.col("Chart") == chart)
+                for row in rows.iter_rows(named=True):
+                    label = str(row["Label"]).strip()
+                    if label not in snapshot:
+                        continue
+                    x_plot, y_plot = _decimate(snapshot["Time"], snapshot[label])
+                    position = int(row["Position"])
+                    legend = str(row.get("Legend", label)).strip()
+                    figure.add_trace(
+                        go.Scattergl(x=x_plot, y=y_plot, mode="lines", name=legend),
+                        row=position,
+                        col=1,
+                    )
+                    unit = str(row.get("Processed_Unit", "")).strip()
+                    if unit:
+                        figure.update_yaxes(title_text=unit, row=position, col=1)
+            figures.append(figure)
+        return figures
 
     @app.callback(
-            Output('para', 'style'),
-            Input('snapshot', 'n_clicks'),
-            Input({'type': 'plot-layout', 'index': ALL}, "children")
+        Output("snapshot-status", "children"),
+        Input("snapshot", "n_clicks"),
+        Input({"type": "graphs", "index": ALL}, "figure"),
+        prevent_initial_call=True,
     )
-    def download(clicks, plots):
-        """Callback to download all plots as html code in
-        the same directory as the data file
-        Input: Clicks on the capture graphs button
-        Input: All plot layouts
-        Output: Style of Para Div
-        """
-        if ctx.triggered_id == "snapshot":
-            for plot in plots:
-                plot_name = plot[0].get('props', {}).get('id').get('index')
-                graph = plot[0].get('props', {}).get('figure')
-                fig = go.Figure(graph)
-                dir = processed_obj.path_dict["datapath"].split(".parquet")[0]
-                fig.write_html(dir + "_" + plot_name + ".html")
-
-        return {'display': 'none'}
-
-    @app.callback(
-            Output('snap', 'style'),
-            Output('light', 'style'),
-            Output('dark', 'style'),
-            Output('play', 'style'),
-            Input('display-switch', 'on')
-    )
-    def _switch_color(value):
-        if value:
-            return {'filter': 'invert(1)'}, {'filter': 'invert(1)'}, {'filter': 'invert(1)'}, {'filter': 'invert(1)'}  # noqa E501
-        return {'filter': 'none'}, {'filter': 'none'}, {'filter': 'none'}, {'filter': 'none'}  # noqa E501
-
-    @app.callback(Output({'type': 'plot-layout', 'index': ALL}, "style"),
-                  Input({'type': 'sidebar-btn', 'index': ALL}, "n_clicks"),
-                  Input('central-layout', 'children'))
-    def navigate(click_list, layout_children):
-        """
-        Callback to navigate and render images on click
-        Output: Visibility & Rendering of certain plot layouts to DOM
-        Input: Clicks on the sidebar layout buttons
-        Input: Children of central layout that are plot layouts
-        """
-        # Array holding styles for each plot layout
-        display = []
-
-        # Returns display for relevant plot on its button being clicked
-        if ctx.triggered:
-            input_id = ctx.triggered[0]["prop_id"].split(".")[0]
-            button_id = json.loads(input_id)["index"]
-
-            for child in layout_children:
-                if child.get('props', {}).get('id').get('index') == button_id:
-                    display.append({'display': 'block'})
-                else:
-                    display.append({'display': 'none'})
-        # Stays on the Home screen if not updated
-        else:
-            for child in layout_children:
-                if child.get('props', {}).get('id').get('index') == 'Home':
-                    display.append({'display': 'block'})
-                else:
-                    display.append({'display': 'none'})
-
-        return display
-
-    @app.callback(
-        Output({'type': 'graphs', 'index': ALL}, "figure"),
-        Input('refresh', 'n_intervals'),
-        Input({'type': 'plot-layout', 'index': ALL}, "children")
-    )
-    def refresh_graphs(intervals, plots):
-        """
-        Callback to update plots at a specified interval
-        Output: Updated plots with data appended at each interval
-        Input: Interval time period to reload the site
-        Input: Children of plot layouts that are graphs
-        """
-        # Hold graphs and plot layouts intermediately
-        updates = {}
-        processed_obj = PostProcessData(**kwargs)
-        print("Refresh")
-        # Obtain and load live data
-        processed_obj.ScaleData()
-        processed_obj.UpdateData()
-        processed_data = processed_obj.df_processed
-        df = processed_obj.All_chart_info.sort("Chart")
-        # Plotting for corresponding charts
-        for i in range(len(df.select("Chart"))):
-            for plot in plots:
-                plot_name = plot[0].get('props', {}).get('id').get('index')
-                if plot_name == df["Chart"][i]:
-
-                    # If graph not updated before, generate its layout and plot
-                    if df["Chart"][i] not in updates:
-
-                        # Create graph Object
-                        graph = plot[0].get('props', {}).get('figure')
-                        graph = go.Figure(graph)
-                        graph = make_subplots(df["Layout"][i], 1)
-                        label = str(df["Label"][i])
-                        # Add chart and axes titles
-                        graph.update_layout(
-                            title_text=df["Chart"][i] + " Graphs"
-                        )
-                        graph.update_xaxes(title_text="Time (s)",
-                                           row=df["Layout"][i])
-                        graph.update_yaxes(title_text=df["Processed_Unit"][i],
-                                           row=df["Position"][i])
-                        # Plot points on graph
-                        graph.add_trace(
-                            go.Scatter(x=processed_data["Time"],
-                                       y=processed_data[label],
-                                       name=df["Legend"][i]
-                                       ),
-                            row=df["Position"][i],
-                            col=1
-                        )
-
-                    # If graph updated before, get updated graph and add traces
-                    else:
-
-                        # Add relevant plot data and axes
-                        label = str(df["Label"][i])
-                        graph = updates.get(df["Chart"][i])
-                        graph.add_trace(
-                                go.Scatter(x=processed_data["Time"],
-                                           y=processed_data[label],
-                                           name=df["Legend"][i]
-                                           ),
-                                row=df["Position"][i],
-                                col=1
-                        )
-                        graph.update_yaxes(title_text=df["Processed_Unit"][i],
-                                           row=df["Position"][i]
-                                           )
-                    # Store new layout
-                    updates[plot_name] = graph
-        return list(updates.values())
+    def snapshots(clicks, figures):
+        if not clicks or ctx.triggered_id != "snapshot":
+            return no_update
+        base = str(Path(paths["datapath"] or "dashboard").with_suffix(""))
+        for index, figure in enumerate(figures or []):
+            go.Figure(figure).write_html(f"{base}_{charts[index]}.html")
+        return f"Saved {len(figures or [])} snapshots"
 
     def open_browser():
-        """
-        Method that opens browser to display link
-        """
-        if not os.environ.get("WERKZEUG_RUN_MAIN"):
-            webbrowser.open_new('http://127.0.0.1:1222/')
+        webbrowser.open_new(f"http://127.0.0.1:{DASHBOARD_PORT}/")
 
     if __name__ == "main":
         return app
-    else:
-        with open('DashboardError.log', 'a') as f:
-            with redirect_stdout(f):
-                Timer(1, open_browser).start()
-                app.run_server(port=1222)
+
+    Timer(1.0, open_browser).start()
+    try:
+        app.run(port=DASHBOARD_PORT, debug=False, use_reloader=False)
+    finally:
+        subscriber.stop()
 
 
 if __name__ == "__main__":
-    app = create_dash_app()
-    app.run_server(port=1222, debug=False)
+    create_dash_app()

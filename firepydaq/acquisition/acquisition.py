@@ -1,1236 +1,783 @@
-##########################################################################
-# FIREpyDAQ - Facilitated Interface for Recording Experiments,
-# a python-package for Data Acquisition.
-# Copyright (C) 2024  Dushyant M. Chaudhari
+"""
+FIREpyDAQ acquisition.py replacement.
 
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+Key changes
+-----------
+- Acquisition blocks are written by one background writer through a bounded queue.
+- Data are persisted immediately as atomic Parquet chunks. The full experiment is
+  never accumulated in RAM for saving.
+- Only the most recent 1200 samples/channel are retained for the local dashboard.
+- Final Parquet consolidation streams row groups and does not concatenate all data
+  in memory.
+- Queue overload, writer errors, duplicate paths, dashboard startup and shutdown,
+  and application shutdown are handled explicitly.
 
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+Install
+-------
+1. Keep the original module as firepydaq/acquisition/acquisition_legacy.py.
+2. Save this file as firepydaq/acquisition/acquisition.py.
+"""
 
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-#########################################################################
+from __future__ import annotations
 
-import sys
-
-# PyQT Related
-from PySide6.QtCore import QTimer, QRegularExpression
-from PySide6.QtGui import QIcon, Qt, QRegularExpressionValidator, QAction
-from PySide6.QtWidgets import (
-    QDialog, QMainWindow, QWidget, QVBoxLayout, QMenu,
-    QTabWidget, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
-    QComboBox, QPushButton, QMessageBox, QFileDialog)
-from .SaveSettingsDialog import SaveSettingsDialog
-from .exception_list import UnfilledFieldError
-from .MainMenu import MainMenu
-import json
-from .NotificationPanel import NotificationPanel
-
-# Dashboard
-from ..dashboard.app import create_dash_app
-from ..utilities.PostProcessing import PostProcessData
-
-import time
-from datetime import datetime, timedelta
-
-# Threading and multiprocesses
-import queue
-import threading
-import concurrent.futures
-import multiprocessing as mp
-
-# Data related
-import polars as pl
-import pandas as pd
-import numpy as np
-import pyarrow.parquet as pq
-
-# String/Files validations
 import glob
-import re
+import json
+import multiprocessing as mp
 import os
-
-# NI related
-from .NIAOtab import NIAOtab
-from ..api.EchoNIDAQTask import CreateDAQTask
-
-# Error handling
+import queue
+import shutil
+import sys
+import threading
+import time
 import traceback
-from ..utilities.ErrorUtils import error_logger, firepydaq_logger
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
 
-# To make the application icon in the tab
-# appear as the selected icon for Windows
-if os.name == 'nt':
-    import ctypes
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('ulfsri.firepydaq.010')  # noqa: E501
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+from PySide6.QtCore import QTimer
+
+from .acquisition_legacy import application as _LegacyApplication
+from .acquisition_legacy import (
+    CreateDAQTask,
+    NIAOtab,
+    create_dash_app,
+    error_logger,
+    firepydaq_logger,
+)
+
+import ctypes
+from .DeviceHealth_Chunks import DeviceHealthManager, ChunkManifestManager
+from ..utilities.firepydaq_path import (get_firepydaq_dir, get_active_run_dir, )
+from ..utilities.serial_runtime import SerialDeviceManager
+from ..utilities.serial_csv_writer import SerialCsvWriter
 
 
-class application(QMainWindow):
+FIREPYDAQ_DIR = get_firepydaq_dir()
+
+DASHBOARD_BUFFER_SAMPLES = 1200
+WRITER_QUEUE_BLOCKS = 32
+WRITER_STOP_TIMEOUT_S = 30.0
+PARQUET_COMPRESSION = "zstd"
+
+@dataclass(frozen=True)
+class _DataBlock:
+    elapsed_s: np.ndarray
+    absolute_time: tuple[str, ...]
+    values: np.ndarray
+    labels: tuple[str, ...]
+
+
+class _ChunkWriter:
+    """Single background writer with a bounded in-memory handoff queue.
+
+    The queue contains at most WRITER_QUEUE_BLOCKS acquisition blocks. Each block
+    is removed from the queue and written to disk immediately. Atomic rename keeps
+    the dashboard from opening a partially written chunk.
     """
-    The main acquisition GUI that can be compiled
-    """
+
+    def __init__(self, chunk_dir: Path, messages: queue.Queue):
+        self.chunk_dir = chunk_dir
+        self.messages = messages
+        self.items: queue.Queue = queue.Queue(maxsize=WRITER_QUEUE_BLOCKS)
+        self.stop_token = object()
+        self.thread: Optional[threading.Thread] = None
+        self.count = 0
+        self.running = False
+        self.failed = False
+
+    def start(self) -> None:
+        self.chunk_dir.mkdir(parents=True, exist_ok=True)
+        existing = sorted(self.chunk_dir.rglob("chunk_*.parquet"))
+        if existing:
+            raise FileExistsError(
+                f"Chunk directory is not empty: {self.chunk_dir}. "
+                "Use a new test name or recover/remove the existing chunks."
+            )
+        self.running = True
+        self.thread = threading.Thread(
+            target=self._run,
+            name="firepydaq-parquet-writer",
+            daemon=False,
+        )
+        self.thread.start()
+
+    def put(self, block: _DataBlock) -> bool:
+        if not self.running or self.failed:
+            return False
+        try:
+            self.items.put_nowait(block)
+            return True
+        except queue.Full:
+            self._message("error", "Writer queue is full; stopping acquisition to prevent silent data loss.")
+            return False
+
+    def stop(self, timeout: float = WRITER_STOP_TIMEOUT_S) -> bool:
+        if not self.running:
+            return True
+        try:
+            self.items.put(self.stop_token, timeout=timeout)
+        except queue.Full:
+            self._message("error", "Writer queue did not drain before shutdown.")
+            return False
+
+        if self.thread is not None:
+            self.thread.join(timeout)
+            if self.thread.is_alive():
+                self._message("error", "Writer did not stop; chunk files remain recoverable.")
+                return False
+        self.running = False
+        return not self.failed
+
+    def _message(self, level: str, text: str) -> None:
+        try:
+            self.messages.put_nowait((level, text))
+        except queue.Full:
+            pass
+
+    def _run(self) -> None:
+        try:
+            while True:
+                item = self.items.get()
+                try:
+                    if item is self.stop_token:
+                        return
+                    self._write_block(item)
+                finally:
+                    self.items.task_done()
+        except Exception as exc:
+            self.failed = True
+            self._message("error", f"Writer failed: {exc}")
+            firepydaq_logger.exception("Background writer failed")
+        finally:
+            self.running = False
+
+    def _write_block(self, block: _DataBlock) -> None:
+        values = np.asarray(block.values)
+        if values.ndim == 1:
+            values = values[np.newaxis, :]
+
+        n = len(block.elapsed_s)
+        if len(block.absolute_time) != n or values.shape[1] != n:
+            raise ValueError(
+                "Acquisition block dimensions disagree: "
+                f"time={n}, absolute_time={len(block.absolute_time)}, values={values.shape}."
+            )
+
+        arrays = {
+            "AbsoluteTime": pa.array(block.absolute_time, type=pa.string()),
+            "Time": pa.array(block.elapsed_s, type=pa.float64()),
+        }
+        for index, label in enumerate(block.labels):
+            if index < values.shape[0]:
+                arrays[label] = pa.array(values[index], type=pa.float32())
+
+        table = pa.table(arrays)
+        final_path = self.chunk_dir / f"chunk_{self.count:08d}.parquet"
+        temporary_path = final_path.with_suffix(".parquet.tmp")
+        pq.write_table(table, temporary_path, compression=PARQUET_COMPRESSION)
+        os.replace(temporary_path, final_path)
+        self.count += 1
+
+
+class application(_LegacyApplication):
+    """Drop-in legacy GUI subclass with bounded-memory, disk-backed recording."""
 
     def __init__(self):
-
         super().__init__()
 
-        self.MakeMainWindow()
-        self.InitialiseTabs()
-        self.InitVars()
-
-    def MakeMainWindow(self):
-        """Creates Main window and adds menu options
-
-        - Fixed Geometry: 900 x 600
-        - Import theme styles from css assets
-        - Initiate light theme for the Window and add logo
-        """
-
-        # Set window properties
-        self.setGeometry(0, 0, 900, 650)
-        self.setFixedSize(900, 650)
-        self.setWindowTitle("Facilitated Interface for Recording Experiments (FIRE)")  # noqa: E501
-        self.menu = MainMenu(self)
-        self.setMenuBar(self.menu)
-
-        self.assets_folder = os.path.dirname(os.path.dirname(os.path.realpath(__file__))) + os.path.sep + "assets"  # noqa: E501
-        self.style_light = self.assets_folder + os.path.sep + "styles_light.css"  # noqa: E501
-        self.style_dark = self.assets_folder + os.path.sep + "styles_dark.css"
-        self.popup_light = self.assets_folder + os.path.sep + "popup_light.css"
-        self.popup_dark = self.assets_folder + os.path.sep + "popup_dark.css"
-        try:
-            f = open(self.style_light)
-            str = f.read()
-            self.setStyleSheet(str)
-            f.close()
-        except Exception:
-            self.notify("Error loading stylesheets", "error")
-
-        ico_path = self.assets_folder + os.path.sep + "FIREpyDAQDark.png"
-        self.setWindowIcon(QIcon(ico_path))
-
-        # Create main widget
-        self.main_widget = QWidget()
-        self.main_widget.setObjectName("MainWidget")
-        self.main_layout = QVBoxLayout(self.main_widget)
-        self.setCentralWidget(self.main_widget)
-
-        self.main_layout.setStretch(0, 2.5)
-        self.main_layout.setStretch(1, 1.5)
-
-    def InitVars(self):
-        """Method that initiates various
-        variables for later use.
-
-        - Empty dicts:
-            - device_arr
-                Keeps a log of all Devices added by the user
-            - settings
-                Stores settings used for NI DAQ
-            - lasers
-                Stores info of Thorlabs CLD101X devices added by the user.
-                Maximum 4 allowed.
-            - mfms
-                Stores info of all Alicat Mass Flow Meters added by the user.
-                Maximum 4 allowed.
-            - mfcs
-                Stores info of Alicat Mass Flow Controllers added by the user.
-                Maximum 4 allowed.
-        - Empty lists:
-            - labels_to_save
-                Stores Labels to save, corresponding to the
-                `Label` in NI config file,
-                during acquisition
-        - Booleans:
-            - running = `True`
-                If GUI is compiled. Default: True
-            - acquiring_data = `False`
-                Boolean which is `True` when acquisition is running
-            - display = `False`
-                Plots or Dashboard
-            - dashboard = `False`
-                If dashboard display is selected. Default: `False`
-            - tab = `False`
-                If Tabular plot display is selected. Default: `False`
-        - Others:
-            - re_StrAllowable = r'^[A-Za-z0-9_]+$'
-                regex format for allowable strings for some input fields.
-                Alphanumeric with underscores, no spaces allowed.
-            - dt_format = "%Y-%m-%d %H:%M:%S:%f"
-                Format for how Absolute time is saved during acquisition
-            - fext = ".parquet"
-                File format for collected NI data
-            - curr_mode = "Light"
-                GUI mode/Theme
-        """
-        # array holding all device objects
-        self.device_arr = {}
-        self.settings = {}
-        self.lasers = {}
-        self.mfms = {}
-        self.mfcs = {}
-
-        self.labels_to_save = []
-
-        self.running = True
-        self.acquiring_data = False
-        self.display = False
-        self.dashboard = False
-        self.tab = False
-
-        self.re_strAllowable = r'^[A-Za-z0-9_]+$'
-        self.dt_format = "%Y-%m-%d %H:%M:%S:%f"
-        self.fext = '.parquet'
-        self.curr_mode = "Light"
-
-    def InitialiseTabs(self):
-        """Initiates tabs based on `input_content`
-        """
-        self.input_tab_widget = QTabWidget()
-        self.input_tab_content = self.input_content()
-        self.input_tab_widget.addTab(self.input_tab_content, "Input Settings")
-        self.main_layout.addWidget(self.input_tab_widget)
-
-    def input_content(self):
-        """Creates input content for NI device by default
-
-        Generated content
-        ------------
-        - name_input: QLineEdit
-            Name for Operator
-            `re_StrAllowable` pattern is checked in `set_up()`
-        - test_input: QLineEdit
-            Name of the test
-            Either a path selected using the `test_btn` button
-            or a string that matches `re_StrAllowable` pattern
-        - test_btn: QPushButton
-            Connects to `set_test_file`
-        - exp_input: QLineEdit
-            Name of the experiment
-            `re_StrAllowable` pattern is checked in `set_up()`
-        - test_type_input: QComboBox
-            Either "Experiment" or "Calibration"
-        - sample_rate_input: QLineEdit
-            Sampling rate for NI device (Hz)
-            Will only accept floats
-        - config_file_edit: QLineEdit
-            Select .csv NI Config File.
-            The `config_input` button can be used to select a file.
-        - config_input: QPushButton
-            Connects to `set_config_file()`
-        - formulae_file_edit: QLineEdit
-            Select an optional .csv formulae file
-            to post-process data when dashboard display is selected.
-
-            A corresponding button can be used to select a file.
-        - formulae_input: QPushButton
-            Connects to `set_formulae_file`
-        - acquisition_button: QPushButton
-            Connects to `acquisition_begins()`
-        - save_button: QPushButton
-            Connects to `save_data()`
-        - panel: QTextEdit
-            Notification panel.
-            Placeholder text: "Welcome User!".
-            Provides notification of errors/warnings/operations.
-
-            Will be cleared after each `save_button` click
-        - log_obs_txt: QLineEdit
-            A 25 (width) x 190 (height) for writing observations.
-        - notif_log_btn: QPushButton
-            Button Text: "Log Obs."
-            Connects to `log_Obs()`
-        """
-        # Input Settings Layout
-        self.input_settings_widget = QWidget()
-        self.main_input_layout = QHBoxLayout(self.input_tab_widget)
-        self.input_layout = QGridLayout()
-
-        # Experimenter's Name
-        self.name_label = QLabel("Enter your name:")
-        self.name_label.setMaximumWidth(200)
-        self.input_layout.addWidget(self.name_label, 0, 0)
-
-        self.name_input = QLineEdit()
-        self.name_input.setMaximumWidth(200)
-        self.name_input.setPlaceholderText("Your name")
-        self.input_layout.addWidget(self.name_input, 0, 1)
-
-        # Experimenter's Name
-        self.test_label = QLabel("Enter your Test name:")
-        self.test_label.setMaximumWidth(200)
-        self.input_layout.addWidget(self.test_label, 2, 0)
-
-        self.test_layout = QHBoxLayout()
-        self.test_input = QLineEdit()
-        self.test_btn = QPushButton("Select")
-        self.test_btn.clicked.connect(self.set_test_file)
-        self.test_input.setMaximumWidth(150)
-        self.test_input.setPlaceholderText("Your Test's name")
-        self.test_btn.setMaximumWidth(50)
-        self.test_layout.addWidget(self.test_input)
-        self.test_layout.addWidget(self.test_btn)
-        self.input_layout.addLayout(self.test_layout, 2, 1)
-
-        # Experiment Name
-        self.exp_label = QLabel("Enter your Project's name:")
-        self.exp_label.setMaximumWidth(200)
-        self.input_layout.addWidget(self.exp_label, 1, 0)
-
-        self.exp_input = QLineEdit()
-        self.exp_input.setPlaceholderText("Your Project's name")
-        self.exp_input.setMaximumWidth(200)
-        self.input_layout.addWidget(self.exp_input, 1, 1)
-
-        # Test Name
-        self.test_type_label = QLabel("Select Experiment Type:")
-        self.test_type_label.setMaximumWidth(200)
-        self.input_layout.addWidget(self.test_type_label, 3, 0)
-
-        self.test_type_input = QComboBox()
-        self.test_type_input.addItem('Experiment')
-        self.test_type_input.addItem('Calibration')
-        self.test_type_input.setMaximumWidth(200)
-        self.input_layout.addWidget(self.test_type_input, 3, 1)
-
-        # Sampling Rate
-        self.sample_rate_label = QLabel("Enter Sampling Rate (Hz):")
-        self.sample_rate_label.setToolTip("Will only accept floats")
-        self.sample_rate_label.setToolTipDuration(500)
-        self.sample_rate_label.setMaximumWidth(200)
-        self.input_layout.addWidget(self.sample_rate_label, 4, 0)
-
-        self.sample_rate_input = QLineEdit()
-        self.sample_rate_input.setMaximumWidth(200)
-        self.sample_rate_input.setPlaceholderText("10")
-        reg_ex_1 = QRegularExpression(r"[0-9]*\.[0-9]{0,4}")  # double
-        self.sample_rate_input.setValidator(QRegularExpressionValidator(reg_ex_1))  # noqa: E501
-        # .setValidator(QRegExpValidator(reg_ex_1))
-        self.input_layout.addWidget(self.sample_rate_input, 4, 1)
-
-        # Configuration File Name
-        self.config_label = QLabel("Select Configuration File:")
-        self.input_layout.addWidget(self.config_label, 5, 0)
-        self.config_label.setMaximumWidth(200)
-
-        self.config_file_layout = QHBoxLayout()
-        self.config_file_edit = QLineEdit()
-        self.config_input = QPushButton("Select")
-        self.config_input.clicked.connect(self.set_config_file)
-        self.config_input.setMaximumWidth(50)
-        self.config_file_edit.setMaximumWidth(150)
-        self.config_file_edit.setPlaceholderText("Your Config file")
-        self.config_file_layout.addWidget(self.config_file_edit)
-        self.config_file_layout.addWidget(self.config_input)
-        self.input_layout.addLayout(self.config_file_layout, 5, 1)
-
-        # Formulae File Name
-        self.formulae_label = QLabel("Select Formulae File:")
-        self.input_layout.addWidget(self.formulae_label, 6, 0)
-        self.formulae_label.setMaximumWidth(200)
-
-        self.formulae_file_layout = QHBoxLayout()
-        self.formulae_file_edit = QLineEdit()
-        self.formulae_input = QPushButton("Select")
-        self.formulae_input.clicked.connect(self.set_formulae_file)
-        self.formulae_input.setMaximumWidth(50)
-        self.formulae_file_edit.setMaximumWidth(150)
-        self.formulae_file_edit.setPlaceholderText("Your Formula file")
-        self.formulae_file_layout.addWidget(self.formulae_file_edit)
-        self.formulae_file_layout.addWidget(self.formulae_input)
-        self.input_layout.addLayout(self.formulae_file_layout, 6, 1)
-
-        # Buttons to begin DAQ
-        self.acquisition_button = QPushButton("Start Acquisition")
-        self.input_layout.addWidget(self.acquisition_button, 7, 0)
-        self.acquisition_button.setCheckable(True)
-        self.acquisition_button.clicked.connect(self.acquisition_begins)
-        self.acquisition_button.setMaximumWidth(200)
-
-        self.save_button = QPushButton("Save")
-        self.save_button.setEnabled(False)
-        self.save_button.setCheckable(True)
-        self.save_button.clicked.connect(self.save_data)
-        self.save_button.setMaximumWidth(200)
-        self.formulae_file = ""
-        self.input_layout.addWidget(self.save_button, 7, 1)
-        self.save_bool = False
-
-        # Initialize NotificationPanel
-        self.notifications_layout = QVBoxLayout()
-
-        # Create dropdown menu for clear and save actions
-        self.notif_head = QHBoxLayout()
-        self.notif_header = QLabel("Notifications Panel")
-        self.notif_header.setMaximumWidth(190)
-        self.notif_header.setMaximumHeight(24)
-        self.notif_head.addWidget(self.notif_header)# noqa E501
-        self.dropdown_button = QPushButton("Options")
-        self.dropdown_button.setMaximumWidth(60)
-        self.dropdown_button.setMaximumHeight(24)
-        self.notif_head.addWidget(self.dropdown_button)
-        self.notif_head.addWidget(self.notif_header)
-        self.notifications_layout.addLayout(self.notif_head)
-
-        # Panel
-        self.panel = NotificationPanel()
-        self.panel.setMaximumHeight(375)
-        self.panel.setFixedWidth(250)
-        self.panel.setAlignment(Qt.AlignRight)
-        self.panel.setAlignment(Qt.AlignTop)
-        self.notifications_layout.addWidget(self.panel)
-
-        # Create input area
-        self.log_area = QHBoxLayout()
-        self.log_obs_txt = QLineEdit()
-        self.log_obs_txt.setPlaceholderText("Write observations here")
-        self.log_area.addWidget(self.log_obs_txt)
-        self.notif_log_btn = QPushButton("Log")
-        self.notif_log_btn.clicked.connect(self.log_Obs)
-        self.log_area.addWidget(self.notif_log_btn)
-        self.notifications_layout.addLayout(self.log_area)
-        self.notif_log_btn.setMaximumWidth(60)
-        self.notif_log_btn.setMaximumHeight(25)
-        self.log_obs_txt.setMaximumWidth(190)
-        self.log_obs_txt.setMaximumHeight(25)
-
-        self.notifmenu = QMenu()
-        clear_action = QAction("Clear", self)
-        clear_action.triggered.connect(self.panel.clear)
-        self.notifmenu.addAction(clear_action)
-
-        self.dropdown_button.setMenu(self.notifmenu)
-
-        save_action = QAction("Save", self)
-        save_action.triggered.connect(self.save_notifs)
-        self.notifmenu.addAction(save_action)
-        # self.notifmenu.setObjectName("NotifMenu")
-
-        self.main_input_layout.addLayout(self.input_layout)
-        self.main_input_layout.addLayout(self.notifications_layout)
-        self.data_visualizer_layout = QHBoxLayout()
-        self.main_input_layout.addLayout(self.data_visualizer_layout)
-        self.input_settings_widget.setLayout(self.main_input_layout)
-
-        return self.input_settings_widget
-
-    def save_notifs(self):
-        file_name, _ = QFileDialog.getSaveFileName(self, "Save File", "", "Text Files (*.txt);;All Files (*)")  # noqa E501
-        if file_name:
-            with open(file_name, 'w') as file:
-                file.write(self.panel.toPlainText())
-
-    def log_Obs(self):
-        """Calls `notify` and clears the `notif_txt_edit`
-        """
-        text = self.log_obs_txt.text()
-        if text:
-            self.notify(text, type="observation")
-            self.log_obs_txt.clear()
-
-    def notify(self, text="", type="default"):
-        """Method that logs observations written in `log_obs_txt`
-        and adds to the top of the notification panel.
-
-        Any observations written here will be added
-        to the notification panel, and a time stamp (format HH:MM:SS)
-        at which the "Log Obs." is clicked will be
-        appended to the written text.
-
-        Arguments
-        _________
-            type: str
-                Type of event: is one of the folowing
-                    "event", "info", "warning", "error", "success", "default"
-            str: str
-                Any string written in `notif_txt_edit`
-
-        Example
-        _______
-            If written observation is "Ignition observed"
-
-            Notification text update will be,
-                `[13:23:56] Ignition Observed`
-        """
-        self.panel.add_message(type, text)
-
-    def set_test_file(self):
-        """ Method that opens a `SaveSettingsDialog`
-        and asks for filename and folder to save the file in.
-        """
-        dlg_save_file = SaveSettingsDialog("Select File to Save Data")
-        self.menu._style_popup(dlg_save_file)
-        if dlg_save_file.exec() == QDialog.Accepted:
-            self.common_path = dlg_save_file.file_path
-            file_pq = self.common_path + ".parquet"
-            file_json = self.common_path + ".json"
-            folder_pq = dlg_save_file.folder_path
-            if os.path.exists(folder_pq):
-                if os.path.exists(file_pq) or os.path.exists(file_json):
-                    self.inform_user("File to save in already exists.")
-                else:
-                    self.parquet_file = file_pq
-                    self.json_file = file_json
-                    self.test_input.setText(self.parquet_file)
-        return
-
-    def set_formulae_file(self):
-        """ Method that opens a `QFileDialog` to open a
-        .csv formulae file
-        """
-        dlg = QFileDialog(self, 'Select a File', None, "CSV files (*.csv)")
-        f = ""
-        if dlg.exec():
-            filenames = dlg.selectedFiles()
-            f = open(filenames[0], 'r')
-        if not isinstance(f, str):
-            self.formulae_file = f.name
-            self.formulae_file_edit.setText(self.formulae_file)
-        return
-
-    def set_config_file(self):
-        """ Method that opens a `QFileDialog` to open a
-        .csv NI config file
-        """
-        dlg = QFileDialog(self, 'Select a File', None, "CSV files (*.csv)")
-        f = ""
-        if dlg.exec():
-            filenames = dlg.selectedFiles()
-            f = open(filenames[0], 'r')
-        if not isinstance(f, str):
-            self.config_file = f.name
-            self.config_file_edit.setText(self.config_file)
-        return
-
-    def dev_arr_to_dict(self):
-        """ Method to store all user-added devices
-        in one dictionary to allow saving a global
-        configuration for the GUI.
-        """
-        dict_dev = {}
-        if self.lasers:
-            dict_dev["Lasers"] = {}
-            for laser in self.lasers:
-                laser_item = self.lasers[laser]
-                dict_dev["Lasers"][laser] = laser_item.settings_to_dict()
-        if self.mfcs:
-            dict_dev["MFCs"] = {}
-            for mfc in self.mfcs:
-                mfc_item = self.mfcs[mfc]
-                dict_dev["MFCs"][mfc] = mfc_item.settings_to_dict()
-        if self.mfms:
-            dict_dev["MFMs"] = {}
-            for mfm in self.mfms:
-                mfm_item = self.mfms[mfm]
-                dict_dev["MFMs"][mfm] = mfm_item.settings_to_dict()
-        return dict_dev
-
-    def is_valid_path(self, path):
-        """ Method that checks if the input path
-        is a valid path
-
-        Parameters
-        ----------
-            path: str
-                Path to check for validity
-
-        Returns
-        -------
-            The return value. True for valid file path. False otherwise.
-        """
-        try:
-            if os.path.isabs(path):
-                if os.path.normpath(path):
-                    return True
-            return False
-        except (TypeError, ValueError):
-            return False
-
-    def _all_fields_filled(self):
-        if (self.name_input.text().strip() == ""
-                or self.exp_input.text().strip() == ""
-                or self.test_input.text().strip() == ""
-                or self.config_file.strip() == ""
-                or self.sample_rate_input.text().strip() == ""):
-            raise UnfilledFieldError("Unfilled fields encountered.")
-        return True
-
-    def validate_df(self, letter, path):
-        """Method to check if the config or formulae file path
-        provided contains valid columns
-
-        Parameters
-        ----------
-            letter: str
-                Indicating either config ("c") or formulae ("f") file path
-            path: str
-                path to the indicated file
-        Returns
-        ------
-            The return value.
-
-            True if columns in the file match with columns for each file.
-            See details in "Config File Example"
-            and "Formulae File Example" for required and
-            necessary columns, and how they are used.
-        """
-        try:
-            df = pl.read_csv(path)
-            cols = []
-        except Exception:
-            return False
-        if letter == "f":
-            cols = ["Label", "RHS", "Chart", "Legend",
-                    "Layout", "Position", "Processed_Unit"]
-        if letter == "c":
-            cols = ["#", "Panel", "Device", "Channel",
-                    "ScaleMax", "ScaleMin", "Label", "TCType",
-                    "Type", "Chart", "AIRangeMin", "AIRangeMax",
-                    "Layout", "Position", "Processed_Unit", "Legend"]
-        cols.sort()
-        df_cols = [i.strip() for i in df.columns]
-        df_cols.sort()
-        col_intersect = list(set(cols) & set(df_cols))
-        # print(col_intersect, " \n", cols, "\n", df_cols)
-        if letter == "f":
-            if cols == df_cols:
-                return True
-        elif letter == "c":
-            if self.dashboard:
-                # todo: Add condition for when display is only tab
-                # or display is dashboard, or both
-                if len(col_intersect) == len(cols):
-                    return True
-            else:
-                if all(e in col_intersect for e in ["Device", "Channel", "Type", "TCType"]):  # noqa: E501
-                    # Allow running acquisition for a minimal config file
-                    return True
-        return False
-
-    def set_up(self):
-        """Method to check NI DAQ setup
-        as defined by the user in input settings.
-
-        - First, a check involves if all fields are filled.
-        Only Formulae file is optional.
-
-        - Input fields and files selected
-        are checked as per requirements
-        indicated in `input_content()`.
-
-        - Paths to save all data and NI DAQ settings
-        are created via calling
-        the method `Create_SavePath()`.
-        """
-        self._all_fields_filled()
-
-        # Allow only alphunumeric string with underscores in names
-        if re.match(self.re_strAllowable, self.name_input.text()) and re.match(self.re_strAllowable, self.exp_input.text()):  # noqa: E501
-            self.settings["Name"] = (self.name_input.text())
-            self.settings["Experiment Name"] = self.exp_input.text()
-        else:
-            raise ValueError("Names can only be alphanumeric or contain spaces.")  # noqa: E501
-
-        try:
-            sampling_rate = float(self.sample_rate_input.text())
-        except ValueError as e:
-            raise ValueError("Invalid Sampling Rate") from e
-        self.settings["Sampling Rate"] = sampling_rate
-
-        self.settings["Experiment Type"] = self.test_type_input.currentText()
-
-        # Create save path
-        self.Create_SavePath()
-
-        if self.formulae_file_edit.text().strip() == "" or self.validate_df("f", self.formulae_file_edit.text()):  # noqa: E501
-            self.settings["Formulae File"] = self.formulae_file_edit.text()
-            self.formulae_file = self.formulae_file_edit.text()
-        else:
-            self.inform_user("Formulae File does not meet requirements.")
-
-        if self.validate_df("c", self.config_file_edit.text()):
-            self.settings["Config File"] = self.config_file_edit.text()
-            self.config_df = pl.read_csv(self.config_file)
-            self.config_df.columns = [i.strip() for i in self.config_df.columns]  # noqa: E501
-            self.labels_to_save = self.config_df.select("Label").to_series().to_list()  # noqa: E501
-        else:
-            self.inform_user("Config File does not meet requirements.")
-            raise ValueError("Check config file")
-
-        if self.device_arr:
-            self.settings["Devices"] = self.dev_arr_to_dict()
-
-    def Create_SavePath(self):
-        """Method to create paths to
-        save all data, NI settings,
-        depending on the test name (`inp_text`).
-
-        - If the user has selected a file to save using
-        the `test_btn` generated in `input_content(),
-        the filename is checked in the path provided.
-        If a filename of that name already exists,
-        the filename is appended with `_XX` number,
-        that increments by 1 for every repeated
-        filename.
-            Example: If the filename is `Exp1` in
-            directory  `C:/Users/XXX/Tests/`,
-            and file by that name exits, the data
-            will be saved in the following format.
-            `C:/Users/XXX/Tests/Exp1_01`.
-            Extensions `.parquet` for NI data,
-            `.json` for NI data info, `.csv`
-            for Alicat devices will be added to `Exp1_01`.
-
-        - If the user types just a text in `inp_text`,
-        a directory and file path to save all data
-        is generated in the directory where
-        this application is compiled.
-            Example: If the `inp_text` is "Test1",
-            Experiment type is "Experiment",
-            User name is "User",
-            Project name is "Project",
-            the save path for NI data will be the following.
-
-            "./02_ExperimentData/YYYYProject/YYYYMMDD_HHMMSS_User_Project_Test1.parquet".
-
-            `02_ExperimentData` directory will be created
-            in the current working directory.
-            `YYYYProject` directory will be
-            created inside this directory.
-
-            If the experiment type is calibration,
-            it will be saved in `01_CalibrationData` instead.
-
-            The YYYY, MM, DD, HH, MM, SS indicate
-            the year, month, date, hour, minute, and seconds
-            respectively when the `save_button` is clicked.
-        """
-        inp_text = self.test_input.text()
-        fname = inp_text.split(self.fext)[0]
-        fpath = inp_text + self.fext
-        if self.is_valid_path(fpath):
-            # If the user selected a custom path to save the data
-            if os.path.isfile(fpath):
-                # If there is already a file by that name
-                test_name = f"{fname}"
-
-                files = glob.glob(f"{fname}*{self.fext}")
-                if len(files) == 1:  # one previous file
-                    # Checking if there is any appended number at the
-                    # last 3 characters before extension
-                    fnumber = re.findall(r'\d+', files[0].split(self.fext)[0][-3:])  # noqa: E501
-                    if not fnumber:
-                        # If no number at the end of that file, append `_01`
-                        test_name = f"{fname}_01"
-                    else:
-                        # If there is a number, get the number, increment by 1
-                        f_x = str(int(fnumber[0])+1).rjust(2, '0')
-                        test_name = f"{fname.split('_'+fnumber[0])[0]}_{f_x}"
-                else:
-                    # If previous files exits, sort them, get the last one,
-                    # and increment the number
-                    files = [sorted(files)[-1]]
-                    fnumber = re.findall(r'\d+', files[0].split(self.fext)[0][-3:])  # noqa: E501
-                    f_x = str(int(fnumber[0])+1).rjust(2, '0')
-                    test_name = f"{fname.split('_'+fnumber[0])[0]}_{f_x}"
-            else:
-                # no previous file
-                test_name = fname
-        else:
-            # If the test name is only the name and the program will create
-            # the file path to save
-            if re.match(self.re_strAllowable, fname):
-                cwd = os.getcwd()
-                now = datetime.now()
-                if self.settings["Experiment Type"] == 'Calibration':
-                    savedir_name = ('01_' + self.settings["Experiment Type"]
-                                    + 'Data')
-                else:
-                    savedir_name = ('02_' + self.settings["Experiment Type"]
-                                    + 'Data')
-                self.save_dir = (cwd + os.sep +
-                                 savedir_name +
-                                 os.sep)
-                if not os.path.exists(self.save_dir):
-                    os.mkdir(self.save_dir)
-                project_dirname = (now.strftime("%Y") +
-                                   self.settings["Experiment Name"] +
-                                   os.sep)
-                self.save_dir = self.save_dir + project_dirname
-                if not os.path.exists(self.save_dir):
-                    os.mkdir(self.save_dir)
-                self.save_dir = (self.save_dir + now.strftime("%Y%m%d_%H%M%S")
-                                 + "_" + self.settings["Name"] + "_" +
-                                 self.settings["Experiment Name"] + "_")
-                test_name = fname
-            else:
-                raise ValueError("""Check test name. It should be either a\
-                                 valid path or a test name that can only\
-                                 contain alphanumeric or\
-                                 contain underscores (no spaces).""")
-
-        self.json_file = test_name + ".json"
-        self.parquet_file = test_name + ".parquet"
-        if self.is_valid_path(inp_text):
-            self.settings["Test Name"] = self.parquet_file
-        else:
-            self.settings["Test Name"] = self.save_dir + self.parquet_file
-        self.common_path = test_name
-        self.test_input.setText(test_name)
-
-    def settings_to_json(self):
-        """Method to save all NI input fields
-        and devices added by the user is saved in a
-        .json file in a location of user's choice.
-
-        These settings can be loaded later.
-        """
-        self._all_fields_filled()
-        self.settings["Experiment Type"] = self.test_type_input.currentText()
-        try:
-            sampling_rate = int(self.sample_rate_input.text())
-        except ValueError as e:
-            raise ValueError("Invalid Sampling Rate") from e
-        self.settings["Sampling Rate"] = sampling_rate
-        if (all(c.isalnum() or c == "_" for c in self.name_input.text()) and
-                all(c.isalnum() or c == "_" for c in self.exp_input.text())):
-            self.settings["Name"] = (self.name_input.text())
-            self.settings["Experiment Name"] = self.exp_input.text()
-        self.settings["Test Name"] = self.test_input.text()
-        self.settings["Formulae File"] = self.formulae_file_edit.text()
-        self.settings["Config File"] = self.config_file_edit.text()
-        if self.device_arr:
-            self.settings["Devices"] = self.dev_arr_to_dict()
-        json_string = json.dumps(self.settings, indent=4)
-        return json_string
-
-    def _set_texts(self):
-        # Is called when main menu .json file is loaded.
-        # Called in repopulate_settings.
-        self.exp_input.setText(self.settings["Experiment Name"])
-        self.name_input.setText(self.settings["Name"])
-        self.test_input.setText(self.settings["Test Name"])
-        self.save_dir = os.path.dirname(self.settings["Test Name"])
-        self.common_path = self.settings["Test Name"].split(".parquet")[0]
-        self.sample_rate_input.setText(str(self.settings["Sampling Rate"]))
-        self.formulae_file = self.settings["Formulae File"]
-        self.formulae_file_edit.setText(self.settings["Formulae File"])
-        self.test_type_input.setCurrentText(self.settings["Experiment Type"])
-        self.config_file = self.settings["Config File"]
-        self.config_file_edit.setText(self.settings["Config File"])
-        firepydaq_logger.info(__name__ + ": Config texts updated.")
-
-    def inform_user(self, err_txt):
-        """Method to inform important
-        operations, errors, and warnings
-        to the user using a pop-up QMessageBox.
-        """
-        self.msg = QMessageBox()
-        self.msg.setWindowTitle("Error Encountered")
-        self.msg.setText(err_txt)
-        if self.curr_mode == "Dark":
-            f = open(self.popup_dark, "r")
-        else:
-            f = open(self.popup_light, "r")
-        str = f.read()
-        self.msg.setStyleSheet(str)
-        f.close()
-        self.msg.exec()
-
-    def validate_fields(self):
-        """Method to validate if the config
-        and the formulae file path would be used
-        without errors during post processing.
-
-        This is done by creating a random data DataFrame.
-        The DataFrame columns correspond to the `Label` column
-        in the config file.
-        The values corresponding to each `Label` is
-        populated with a random integer between 0 and 10.
-
-        The random data DataFrame, config file path, and formulae path
-        are supplied to PostProcessData for checking if
-        the random DataFrame (simulating collected data)
-        can be scaled and post processed without any errors.
-        """
-        self.set_up()
-        if self.display and self.tab and hasattr(self, "data_vis_tab"):
-            self.data_vis_tab.set_labels(self.config_file)
-        config_df = pl.read_csv(self.settings["Config File"])
-        random_input = np.array([np.random.randint(0, 10)*i for i in np.ones(config_df.select("Label").shape)])  # noqa: E501
-        random_dict = {i: random_input[n] for n, i in enumerate(self.labels_to_save)}  # noqa: E501
-        random_df = pl.DataFrame(data=random_dict)
-        CheckPP = PostProcessData(datapath=random_df, configpath=self.settings['Config File'], formulaepath=self.settings['Formulae File'])  # noqa: E501
-        CheckPP.ScaleData()
-        CheckPP.UpdateData(dump_output=False)
-
-    def initiate_dataArrays(self):
-        """A method to initiate empty numpy data array for
-        storing NI data during acquisition.
-
-        If the number of Analog Inputs (AI)
-        in the config file is 1,
-        an empty `ydata` numpy array of shape (1,) is created.
-
-        If the number of AIs are greater than one (example 4),
-        an empty `ydata` numpy array of shape (4,) is created
-
-        If there are both AIs and Analog Outputs (AO)
-        in the config file, empty `ydata` array with
-        shape equal to total AI (say 3) and AOs (say 1),
-        (4,) is created.
-
-        An empty `xdata` array of shape (1,)
-        for storing relative times
-        is created with a single element `0`.
-
-        An empty 1D numpy array of name `abs_timestamp`
-        is created to store corresponding
-        absolute times during acquisition.
-        """
-        if self.NIDAQ_Device.ai_counter > 0:
-            if len(self.NIDAQ_Device.ailabel_map) == 1:
-                self.ydata = np.empty(0)
-            else:
-                self.ydata = np.empty((len(self.NIDAQ_Device.ailabel_map), 0))
-        else:  # Todo: check for bugs with AO module
-            self.ydata = np.empty((len(self.settings["Label"]), 0))
-        if self.mfcs != {}:
-            self.all_mfcData = {}
-            for mfcname in self.mfcs:
-                self.all_mfcData[mfcname] = pl.DataFrame()
-        self.xdata = np.array([0])
-        self.abs_timestamp = np.array([])
-        self.timing_np = np.empty((0, 3))
-
-    def acquisition_begins(self):
-        """Method to begin acquisition for all devices.
-
-        The following methods are called in order.
-        1. `validate_fields()`.
-        2. `CreateDAQTask()` in `api` module to create
-        AI and AO continuous tasks. (See `api` module for details)
-        3. `initiate_dataArrays()`
-
-        Once these run without any issues, the `save_button`
-        is enabled, `ContinueAcquisition` boolean is set to True,
-
-
-
-        """
-        # todo: Disable config, formulae, and sampling rate after acq begins.
-        # Only allow name changes after acq begins.
-        # todo: regarding notification panel: save option pop up
-        # after acq stops
-        # todo: if the dropdown is possible on notification panel,
-        # create a clear notification panel option.
-        if self.acquisition_button.isChecked():
+        import threading
+
+        if not hasattr(self, "vis_lock"):
+            self.vis_lock = threading.Lock()
+
+        self._writer: Optional[_ChunkWriter] = None
+        self._writer_started = False
+        self._finalize_lock = threading.Lock()
+        self._writer_messages: queue.Queue = queue.Queue(maxsize=100)
+        self._writer_message_timer = QTimer(self)
+        self._writer_message_timer.timeout.connect(self._drain_writer_messages)
+        self._writer_message_timer.start(250)
+        self._dashboard_process = None
+        self.queue_warning_75_sent = False
+        self.queue_warning_90_sent = False
+
+        self.serial_devices = SerialDeviceManager(
+            health_manager_getter=lambda: self.device_health,
+        )
+        self._serial_workers_started = False
+        self._serial_writer: Optional[SerialCsvWriter] = None
+        self._serial_last_saved_sequence: dict[str, int] = {}
+        self._serial_elapsed_origin: Optional[float] = None
+
+        self.device_health = None
+        self.manifest = None
+        self.last_device_health_write = 0.0
+
+    def _drain_writer_messages(self) -> None:
+        while True:
             try:
-                self.validate_fields()
-            except Exception as e:
-                self.inform_user(str(e))
-                self.notify("Validation of input fields failed.", "error")
-                self.acquisition_button.nextCheckState()
+                level, text = self._writer_messages.get_nowait()
+            except queue.Empty:
                 return
-            self.run_counter = 0
-            if hasattr(self, 'NIDAQ_Device'):
-                self.NIDAQ_Device.aitask.stop()
-                self.NIDAQ_Device.aitask.close()
-                if hasattr(self.NIDAQ_Device, "aotask"):
-                    self.input_tab_widget.removeTab(1)
-                    self.NIDAQ_Device.aotask.stop()
-                    self.NIDAQ_Device.aotask.close()
-                del self.NIDAQ_Device
+            self.notify(text, level)
 
-            try:
-                self.NIDAQ_Device = CreateDAQTask(self, "NI Task")
-                self.NIDAQ_Device.CreateFromConfig(self.settings["Config File"])  # noqa: E501
+    def _start_safe_writer(self) -> None:
+        if self._writer_started:
+            return
 
-                if self.NIDAQ_Device.ai_counter > 0:
-                    sample_rate = int(self.settings["Sampling Rate"])
-                    self.NIDAQ_Device.StartAIContinuousTask(sample_rate, sample_rate)  # noqa: E501
-                if self.NIDAQ_Device.ao_counter > 0:
-                    self.niaotab = NIAOtab(self, self.NIDAQ_Device.aolabel_map)
-                    AO_initials = np.array([0 for i in self.NIDAQ_Device.aolabel_map.keys()], dtype=np.float64)  # noqa: E501
-                    self.NIDAQ_Device.StartAOContinuousTask(AO_initials=AO_initials)  # noqa: E501
-            except Exception:
-                # todo: Parse NI errors properly.. sampling rate? device name? config file error? # noqa: E501
-                self.acquisition_button.nextCheckState()
-                type, value, tb = sys.exc_info()
-                print(type, value, traceback.print_tb(tb))
-                self.inform_user("Terminating acquisition due to DAQ Connection Errors\n " + str(type) + str(value))  # noqa: E501
+        chunk_dir = chunk_dir = get_active_run_dir(self.common_path)
+
+        chunk_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        writer = _ChunkWriter(chunk_dir, self._writer_messages)
+        writer.start()
+        self._writer = writer
+        self._writer_started = True
+        firepydaq_logger.info("Disk-backed Parquet writer started: %s", chunk_dir)
+
+    def _finalize_safe_writer(self) -> None:
+        with self._finalize_lock:
+            if not self._writer_started or self._writer is None:
                 return
 
-            if self.mfcs != {}:
-                all_connected = []
-                for mfcname in self.mfcs:
-                    all_connected.append(hasattr(self.mfcs[mfcname], "loop"))
+            writer = self._writer
+            writer_ok = writer.stop()
+            self._writer_started = False
+            self._drain_writer_messages()
+
+            chunks = sorted(writer.chunk_dir.glob("chunk_*.parquet"))
+            if not chunks:
+                self.notify("No data chunks were written.", "warning")
+                return
+
+            final_path = Path(str(self.common_path) + ".parquet")
+            temporary_path = final_path.with_suffix(final_path.suffix + ".tmp")
+
+            if final_path.exists() or temporary_path.exists():
+                self.notify(
+                    f"Final output already exists; raw chunks remain in {writer.chunk_dir}",
+                    "error",
+                )
+                return
+
+            parquet_writer = None
+            rows = 0
+            try:
+                for chunk in chunks:
+                    table = pq.read_table(chunk)
+                    if parquet_writer is None:
+                        parquet_writer = pq.ParquetWriter(
+                            temporary_path,
+                            table.schema,
+                            compression=PARQUET_COMPRESSION,
+                        )
+                    parquet_writer.write_table(table)
+                    rows += table.num_rows
+                if parquet_writer is not None:
+                    parquet_writer.close()
+                    parquet_writer = None
+                os.replace(temporary_path, final_path)
+
+                csv_path = final_path.with_suffix(".csv")
                 try:
-                    if not all(all_connected):
-                        raise ConnectionError("All MFC connections must be established before aquisition.")  # noqa E501
-                except Exception as e:
-                    self.acquisition_button.nextCheckState()
-                    self.inform_user(str(e))
-                    return
+                    pq.read_table(final_path).to_pandas().to_csv(
+                                       csv_path,
+                                       index=False,
+                                   )
 
-            self.initiate_dataArrays()
-            self.ContinueAcquisition = True
-            self.save_button.setEnabled(True)
-            self.acquisition_button.setText("Stop Acquisition")
-            self.notify("Validation complete. Acquisition begins.", "info")
-            self.runpyDAQ()
-            self.notify("Acquiring Data . . .", "info")
+                    final_rows = pq.ParquetFile(final_path).metadata.num_rows
+
+                    if final_rows != rows:
+                        raise RuntimeError(
+                            f"Row mismatch. chunks={rows}, final={final_rows}"
+                        )
+                    if self.manifest is not None:
+                        self.manifest.finalize(
+                            final_path,
+                            csv_path,
+                            final_rows,
+                        )
+                        
+                        final_manifest_path = (
+                            FIREPYDAQ_DIR
+                            / f"{final_path.stem}_manifest.json"
+                        )
+
+                        with open(final_manifest_path, "w", encoding="utf-8",) as fp:
+                            json.dump(self.manifest.manifest, fp, indent=2,)
+                except Exception as exc:
+                    self.notify(
+                        f"CSV export failed: {exc}",
+                        "warning",
+                    )
+
+                status = "success" if writer_ok else "warning"
+
+                if writer_ok:
+                    shutil.rmtree(writer.chunk_dir, ignore_errors=True,)
+                    self.notify(
+                        f"Finalized {rows:,} samples to {final_path}; temporary chunks removed.",
+                        status,
+                    )
+                else:
+                    self.notify(
+                        f"Finalized {rows:,} samples to {final_path}; chunks retained because the writer reported an error.",
+                        status,
+                    )
+            except Exception as exc:
+                if parquet_writer is not None:
+                    parquet_writer.close()
+                temporary_path.unlink(missing_ok=True)
+                self.notify(
+                    f"Final consolidation failed: {exc}. Raw chunks remain in {writer.chunk_dir}",
+                    "error",
+                )
+                firepydaq_logger.exception("Final Parquet consolidation failed")
+
+    @staticmethod
+    def _append_dashboard_buffer(existing, new, max_samples=DASHBOARD_BUFFER_SAMPLES):
+        new = np.asarray(new)
+        existing = np.asarray(existing)
+        if new.ndim == 1:
+            combined = np.concatenate((existing.reshape(-1), new.reshape(-1)))
+            return combined[-max_samples:]
+
+        if existing.ndim != 2 or existing.shape[0] != new.shape[0]:
+            combined = new
         else:
-            self.ContinueAcquisition = False
-            time.sleep(1)
-            self.save_bool = False
-            self.run_counter = 0
-            self.save_button.setEnabled(False)
-            self.notify("Acquisition stopped.", "info")
-            self.acquisition_button.setText("Start Acquisition")
+            combined = np.concatenate((existing, new), axis=1)
+        return combined[:, -max_samples:]
 
-    def save_data_thread(self):
-        """Method that saves acquired NI data in a
-        `.parquet` file in path created as per `Create_SavePath()`.
-        """
-        time_data = np.array(self.xdata_new)
-        abs_time = np.array(self.abs_timestamp)
-        time_data = time_data[np.newaxis, :]
-        abs_time = abs_time[np.newaxis, :]
-        ydata_new = self._queue.get(block=True, timeout=1)
-
-        if len(ydata_new.shape) == 1:
-            # If a single channel, a list is returned by nidaqmx
-            ydata_new = ydata_new[np.newaxis, :]
-        temp_data = np.append(time_data, np.array(ydata_new), axis=0)
-
-        temp_data = np.append(abs_time, temp_data, axis=0)
-        save_dataframe = pl.DataFrame(schema=self.pl_schema_dict, data=temp_data, orient='col')  # noqa: E501
-        self.parquet_file = self.common_path + ".parquet"
-
+    def _stop_dashboard(self) -> None:
+        process = getattr(self, "dash_thread", None) or self._dashboard_process
+        if process is None:
+            return
         try:
-            if os.path.isfile(self.parquet_file):
-                table = pq.read_table(self.parquet_file)
-                old_pq = pl.from_arrow(table)
-                new_df = pl.concat([old_pq, save_dataframe])
-            else:
-                new_df = save_dataframe
-            new_df.write_parquet(self.parquet_file)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=2)
+        except Exception as exc:
+            firepydaq_logger.warning("Dashboard shutdown failed: %s", exc)
+        finally:
+            self._dashboard_process = None
+            if hasattr(self, "dash_thread"):
+                self.dash_thread = None
 
-            if self.mfcs != {}:
-                for mfcname, data in self.all_mfcData.items():
-                    MFC_filename = self.parquet_file.split(".parquet")[0] + '_' + mfcname + '.csv'  # noqa E501
-                    data_df = pd.DataFrame(data, index=[self.xdata_new[0]])
-                    data_df.to_csv(MFC_filename, mode="a", header=not os.path.isfile(MFC_filename))  # noqa E501
-
-        except Exception as e:
-            self.notify(str(e), "error")
-            self.notify("Error during saving operation", "error")
-        return
+    def _start_dashboard(self) -> None:
+        self._stop_dashboard()
+        mp.freeze_support()
+        process = mp.Process(
+            target=create_dash_app,
+            kwargs={"jsonpath": self.json_file},
+            name="firepydaq-dashboard",
+            daemon=True,
+        )
+        process.start()
+        self._dashboard_process = process
+        self.dash_thread = process
+        self.notify("Launching Dashboard on http://127.0.0.1:1222", "info")
 
     def runpyDAQ(self):
-        '''Method that continuously runs the Data acquisition system
-        until "Stop Acquisition" is clicked.
-
-        '''
-        # AO debug in process
+        self._ensure_serial_workers()
+        self._snapshot_serial_devices()
         no_samples = self.NIDAQ_Device.numberOfSamples
-        self.ActualSamplingRate = self.NIDAQ_Device.aitask.timing.samp_clk_rate  # noqa E501
-        samplesAvailable = self.NIDAQ_Device.aitask._in_stream.avail_samp_per_chan  # noqa: E501
-        if self.mfcs != {}:
-            self.alicat_locks = {}
-            for mfcname, al_mfc in self.mfcs.items():
-                # Lock Alicat thread for release only
-                # when NI data is available
-                self.alicat_locks[mfcname] = threading.Lock()
-                self.alicat_locks[mfcname].acquire()
-                self.all_mfcData[mfcname] = al_mfc.GetFlows()
+        self.ActualSamplingRate = self.NIDAQ_Device.aitask.timing.samp_clk_rate
+        samples_available = self.NIDAQ_Device.aitask._in_stream.avail_samp_per_chan
 
-        if (samplesAvailable >= no_samples):
+        # if self.mfcs != {}:
+        #     self.alicat_locks = {}
+        #     for mfcname, al_mfc in self.mfcs.items():
+        #         lock = threading.Lock()
+        #         self.alicat_locks[mfcname] = lock
+        #         lock.acquire()
+        #         self.all_mfcData[mfcname] = al_mfc.GetFlows()
+        #         if self.device_health is not None:
+        #             self.device_health.good_read(mfcname)
+
+        if samples_available >= no_samples:
             try:
-                t_bef_read = time.time()
-                # parallels_bef = time.time()
-                # Executor waits for the threads to complete their task.
-                # Pauses other buttons or creates delays.
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    # Threading AI, AO , and Device tasks
-                    aithread = executor.submit(self.NIDAQ_Device.threadaitask)
-                    self.ydata_new = aithread.result()
-                    self.ydata_new = np.array(self.ydata_new)
-                    if self.NIDAQ_Device.ao_counter > 0:
-                        AO_outputs = [0 for i in range(self.NIDAQ_Device.ao_counter)]  # noqa: E501
-                        # AO_outputs will need user iniput.
-                        # Currently only float values are accepted.
-                        aothread = executor.submit(self.NIDAQ_Device.threadaotask, AO_initials=AO_outputs)  # noqa: E501
-                        self.written_data = aothread.result()
+                read_started = time.perf_counter()
+                self.ydata_new = np.asarray(self.NIDAQ_Device.threadaitask())
 
-                if self.mfcs != {}:
-                    for mfcname, _ in self.mfcs.items():
-                        # Release alicat threads once the data is acquired.
-                        self.alicat_locks[mfcname].release()
-                # self.alicat_locks[mfcname].acquire()
-                t_aft_read = time.time()
-                t_now = datetime.now()
+                if self.device_health is not None:
+                    self.device_health.good_read("NI")
+                if self.NIDAQ_Device.ao_counter > 0:
+                    self.written_data = self.NIDAQ_Device.threadaotask(
+                        AO_initials=[0] * self.NIDAQ_Device.ao_counter
+                    )
 
-                if (t_aft_read-t_bef_read) > 1/self.ActualSamplingRate:
-                    # Read time exceeds prescribed 1/(sampling frequency)
-                    self.notify("Data Loss WARNING: Time to read exceeds number of samples per seconds prescribed for acquisition.", "warning")  # noqa: E501
+                # if self.mfcs != {}:
+                #     for lock in self.alicat_locks.values():
+                #         if lock.locked():
+                #             lock.release()
 
-                if len(self.ydata.shape) == 1:
-                    self.ydata = np.append(self.ydata, self.ydata_new, axis=0)
+                block_duration = no_samples / self.ActualSamplingRate
+                previous_time = float(self.xdata[-1]) if len(self.xdata) else 0.0
+                if previous_time == 0.0:
+                    self.xdata_new = np.arange(no_samples, dtype=np.float64) / self.ActualSamplingRate
                 else:
-                    self.ydata = np.append(self.ydata, self.ydata_new, axis=1)
-                t_diff = no_samples/self.ActualSamplingRate
-                tdiff_array = np.linspace(1/self.ActualSamplingRate, t_diff, no_samples)  # noqa: E501
-                if self.xdata[-1] == 0:
-                    self.xdata_new = np.linspace(self.xdata[-1], self.xdata[-1] + t_diff, no_samples, endpoint=False)  # noqa: E501
-                    if len(self.ydata.shape) == 1 and len(self.xdata_new) == 1:  # noqa: E501
-                        # For 1 Hz sampling frequency
-                        self.xdata_new = [no_samples/self.ActualSamplingRate]
-                    self.xdata = self.xdata_new
-                    self.abs_timestamp = [(t_now+timedelta(seconds=sec)).strftime(self.dt_format) for sec in tdiff_array]  # noqa: E501
-                else:
-                    self.xdata_new = np.linspace(self.xdata[-1]+1/self.ActualSamplingRate, self.xdata[-1]+t_diff, no_samples)  # noqa: E501
-                    self.abs_timestamp = [(t_now+timedelta(seconds=sec)).strftime(self.dt_format) for sec in tdiff_array]  # noqa: E501
-                    self.xdata = np.append(self.xdata, self.xdata_new)
+                    self.xdata_new = previous_time + (
+                        np.arange(1, no_samples + 1, dtype=np.float64) / self.ActualSamplingRate
+                    )
 
-                if self.save_bool:
-                    self._queue.put(self.ydata_new, block=True, timeout=1)
-                    # As long as save does not take more than 1 s,
-                    # there should be no conflict with acquisition.
-                    save_thread = threading.Thread(target=self.save_data_thread)  # noqa E501
-                    save_thread.start()
+                block_end = datetime.now()
+                offsets = np.arange(no_samples - 1, -1, -1, dtype=np.float64) / self.ActualSamplingRate
+                self.abs_timestamp = [
+                    (block_end - timedelta(seconds=float(offset))).strftime(self.dt_format)
+                    for offset in offsets
+                ]
 
-                t_aft_save = time.time()
-                if (t_aft_save - t_bef_read) > 1/self.ActualSamplingRate:
-                    # Time between read and save time exceeds
-                    # prescribed 1/(sampling frequency)
-                    self.notify("Data Loss WARNING: Time to save exceeds number of samples per seconds prescribed for acquisition.", "warning")  # noqa: E501
+                if self.save_bool and self._writer_started and self._writer is not None:
+                    block = _DataBlock(
+                        elapsed_s=np.array(self.xdata_new, dtype=np.float64, copy=True),
+                        absolute_time=tuple(self.abs_timestamp),
+                        values=np.array(self.ydata_new, copy=True),
+                        labels=tuple(self.labels_to_save),
+                    )
+                    qsize = self._writer.items.qsize()
+                    qmax = self._writer.items.maxsize
 
-                # Plots
+                    fill = qsize / qmax
+
+                    if fill > 0.90 and not self.queue_warning_90_sent:
+                        self.notify(
+                            f"Writer queue at {fill:.0%} capacity",
+                            "warning",
+                        )
+                        self.queue_warning_90_sent = True
+
+                    elif fill > 0.75 and not self.queue_warning_75_sent:
+                        self.notify(
+                            f"Writer queue at {fill:.0%} capacity",
+                            "warning",
+                        )
+                        self.queue_warning_75_sent = True
+
+                    elif fill < 0.50:
+                        self.queue_warning_75_sent = False
+                        self.queue_warning_90_sent = False
+                    if not self._writer.put(block):
+                        self.save_bool = False
+                        self.ContinueAcquisition = False
+                    else:
+                        if self.manifest is not None:
+                            self.manifest.update_chunk(
+                                len(block.elapsed_s)
+                            )
+
+                self.xdata = self._append_dashboard_buffer(self.xdata, self.xdata_new)
+                self.ydata = self._append_dashboard_buffer(self.ydata, self.ydata_new)
+
                 if hasattr(self, "data_vis_tab"):
                     if not hasattr(self.data_vis_tab, "dev_edit"):
                         self.data_vis_tab.set_labels(self.config_file)
-                    self.vis_lock = threading.Lock()
-                    self.vis_lock.acquire(timeout=0.5)
-                    if len(self.ydata.shape) == 1:
-                        self.data_vis_tab.set_data_and_plot(self.xdata, self.ydata)  # noqa: E501
-                    else:
-                        self.data_vis_tab.set_data_and_plot(self.xdata, self.ydata[self.data_vis_tab.get_curr_selection()])  # noqa: E501
 
-                if (self.xdata[-1] % 5) <= 1/self.ActualSamplingRate:
-                    text_update = ("Last time entry:" +
-                                   str(round(self.xdata[-1], 2)) +
-                                   ", Total samples/chan:" +
-                                   str(self.NIDAQ_Device.aitask.in_stream.total_samp_per_chan_acquired) +  # noqa: E501
-                                   ",\n Actual Hz:" +
-                                   str(round(self.NIDAQ_Device.aitask.timing.samp_clk_rate, 2)))  # noqa: E501
-                    self.notify(text_update)
+                    # The visualization worker releases vis_lock after consuming
+                    # the arrays. Use a plain Lock because that release can occur
+                    # from the worker thread. An RLock is thread-owned and raises
+                    # "cannot release un-acquired lock" in that situation.
+                    plot_slot_acquired = self.vis_lock.acquire(blocking=False)
+                    if plot_slot_acquired:
+                        try:
+                            if np.asarray(self.ydata).ndim == 1:
+                                n = min(len(self.xdata), len(self.ydata))
+                                x_plot = np.array(self.xdata[-n:], copy=True)
+                                y_plot = np.array(self.ydata[-n:], copy=True)
+                            else:
+                                selection = self.data_vis_tab.get_curr_selection()
+                                selected_y = np.asarray(self.ydata[selection])
+                                n = min(len(self.xdata), len(selected_y))
+                                x_plot = np.array(self.xdata[-n:], copy=True)
+                                y_plot = np.array(selected_y[-n:], copy=True)
+
+                            if n > 0:
+                                self.data_vis_tab.set_data_and_plot(x_plot, y_plot)
+                            else:
+                                self.vis_lock.release()
+                        except Exception:
+                            # set_data_and_plot did not accept the update, so its
+                            # worker cannot release the lock. Release it here.
+                            if self.vis_lock.locked():
+                                self.vis_lock.release()
+                            raise
+
+                read_elapsed = time.perf_counter() - read_started
+                if read_elapsed > block_duration:
+                    self.notify(
+                        "Data-loss warning: acquisition processing exceeded one hardware block duration.",
+                        "warning",
+                    )
+
+                if (
+                        self.device_health is not None
+                        and time.monotonic() -
+                        self.last_device_health_write
+                        > 5.0
+                    ):
+                    self.device_health.update_stale_states()
+
+                    self.device_health.write()
+
+                    self.last_device_health_write = (
+                        time.monotonic()
+                    )
+
+                last_time = float(self.xdata_new[-1])
+                if int(last_time // 5) != int((last_time - block_duration) // 5):
+                    total = self.NIDAQ_Device.aitask.in_stream.total_samp_per_chan_acquired
+                    self.notify(
+                        f"Last time entry: {last_time:.2f}, "
+                        f"Total samples/chan: {total}, "
+                        f"Actual Hz: {self.ActualSamplingRate:.2f}"
+                    )
             except Exception:
-                the_type, the_value, the_traceback = sys.exc_info()
+                if self.device_health is not None:
+                    try:
+                        self.device_health.error("NI")
+                    except Exception:
+                        pass
+                exc_type, exc_value, exc_traceback = sys.exc_info()
                 self.ContinueAcquisition = False
-                # print(the_type, the_value, the_traceback)
-                self.inform_user(str(the_type) + str(the_value))
-                traceback.print_tb(the_traceback)  # noqa: E501
+                self.inform_user(f"{exc_type}{exc_value}")
+                traceback.print_tb(exc_traceback)
 
         if self.ContinueAcquisition and self.running:
             QTimer.singleShot(1, self.runpyDAQ)
         else:
             self.run_counter = 0
+            if self._writer_started:
+                self._finalize_safe_writer()
+            self._stop_serial_writer()
+            self._stop_serial_workers()
             self.notify("Acquisition stopped.", "info")
             self.acquisition_button.setText("Start Acquisition")
             self.save_button.setEnabled(False)
-            if hasattr(self, "dash_thread"):
-                self.dash_thread.terminate()
-                self.notify("Dashboard closed.", "info")
+            self._stop_dashboard()
 
     @error_logger("SaveData")
     def save_data(self):
-        """Method that initiates data arrays
-        """
         if self.save_button.isChecked():
             self.save_button.setText("Stop")
             self.save_bool = True
             self.run_counter = 0
-            self._queue = queue.Queue(maxsize=0)  # infinite queue size
-
-            # This will call Create_save path also based on updated fields.
             self.set_up()
-            if not self.is_valid_path(self.json_file):
-                self.json_file = self.save_dir+self.json_file
-            with open(self.json_file, "x") as outfile:
-                outfile.write(json.dumps(self.settings, indent=4))
 
+            if not self.is_valid_path(self.json_file):
+                self.json_file = self.save_dir + self.json_file
             if not self.is_valid_path(self.common_path):
                 self.common_path = self.save_dir + self.common_path
-            assert self.is_valid_path(self.common_path)
+
+            json_path = Path(self.json_file)
+            json_path.parent.mkdir(parents=True, exist_ok=True)
+
+            settings_copy = dict(self.settings)
+            configured_devices = []
+
+            devices = settings_copy.get("Devices", {},)
+
+            if hasattr(self, "generic_serial_devices",):
+                serial_devices = {}
+
+                for name, runtime in self.generic_serial_devices.items():
+
+                    config = runtime.config
+
+                    serial_devices[name] = {
+                        "name": config.name,
+                        "port": config.port,
+                        "baud_rate": config.baud_rate,
+                        "delimiter": config.delimiter,
+                        "columns": config.columns,
+                        "read_timeout_s": config.read_timeout_s,
+                        "save_frequency_hz": config.save_frequency_hz,
+                        "encoding": config.encoding,
+                        "enabled": config.enabled,
+                        "Type": "streaming_serial",
+                    }
+                configured_devices.extend(list(self.generic_serial_devices.keys()))
+                if serial_devices:
+                    devices["SerialDevices"] = serial_devices
+
+            settings_copy["Devices"] = devices
+
+            with json_path.open(
+                "x",
+                encoding="utf-8",
+            ) as outfile:
+
+                json.dump(
+                    settings_copy,
+                    outfile,
+                    indent=4,
+                )
 
             self.initiate_dataArrays()
-            firepydaq_logger.info("Saving initiated properly.")
-            self.save_begin_time = time.time()
-            self.notify("Saving Data in " + self.settings["Test Name"], "info")
 
-            pl_cols = self.labels_to_save
-            pl_cols.insert(0, "Time")
-            pl_cols.insert(0, "AbsoluteTime")
-            self.pl_schema_dict = {}
-            for col in pl_cols:
-                if 'AbsoluteTime' not in col:
-                    self.pl_schema_dict[col] = pl.Float32
-                else:
-                    self.pl_schema_dict[col] = pl.String
+            health_dir = (".firepydaq")
+            
+            self.device_health = DeviceHealthManager(health_dir)
+            self.last_device_health_write = 0.0
+
+            ## registering device health
+            # NI DAQ
+            self.device_health.register(
+                "NI",
+                "DAQ"
+            )
+
+            # Alicats
+            if hasattr(self, "mfcs"):
+                for mfcname in self.mfcs.keys():
+                    self.device_health.register(
+                        mfcname,
+                        "ALICAT"
+                    )
+                configured_devices.extend(list(self.mfcs.keys()))
+
+            # User-added devices
+            if hasattr(self, "devices"):
+                for devicename in self.devices.keys():
+                    self.device_health.register(
+                        devicename,
+                        "DEVICE"
+                    )
+
+            chunk_dir = get_active_run_dir(self.common_path)
+            chunk_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            self.manifest = ChunkManifestManager(
+                chunk_dir,
+                self.settings,
+                self.labels_to_save,
+            )
+
+            self.manifest.write()
+
+            self._start_safe_writer()
+            self._start_serial_writer()
+            self.save_begin_time = time.time()
+            if hasattr(self, "operator_events"):
+                try:
+                    self.acquisition_start_monotonic = time.monotonic()
+                    self.operator_events.configure_for_current_test()
+                    if hasattr(self.panel, "recent_events"):
+                        self.panel.recent_events.clear()
+                except Exception as exc:
+                    self.notify(
+                        f"Operator event initialization failed: {exc}",
+                        "warning",
+                    )
+            firepydaq_logger.info("Safe saving initiated")
+
+            if hasattr(self, "NIDAQ_Device"):
+                configured_devices.insert(0, "NI")
+
+            self.notify(
+                "Configured devices: "
+                + ", ".join(configured_devices),
+                "info",
+            )
+            self.notify(f"Saving Data in {self.settings['Test Name']}", "info")
 
             if self.dashboard:
-                firepydaq_logger.info("Dash app Process initiated after saving initiations")  # noqa: E501
-                self.notify("Launching Dashboard on https://127.0.0.1:1222", "info")  # noqa E501
-                mp.freeze_support()
-                self.dash_thread = mp.Process(target=create_dash_app, kwargs={"jsonpath": self.json_file})  # noqa: E501
-                self.dash_thread.start()
+                self.settings["Data File"] = self.common_path + ".parquet"
+                self._start_dashboard()
         else:
             self.save_button.setText("Save")
-            self.notify("Saving Stopped", "info")
-            if hasattr(self, "dash_thread"):
-                self.dash_thread.terminate()
             self.save_bool = False
-
-    def safe_exit(self):
-        """Method that stops and closes NI AI and AO tasks.
-        """
-        if hasattr(self, 'NIDAQ_Device'):
-            self.NIDAQ_Device.aitask.stop()
-            self.NIDAQ_Device.aitask.close()
-            if hasattr(self.NIDAQ_Device, "aotask"):
-                self.NIDAQ_Device.aotask.stop()
-                self.NIDAQ_Device.aotask.close()
-            del self.NIDAQ_Device
-        self.close()
+            self.panel.operator_events.path_label.clear()
+            self.panel.recent_events.clear()
+            self.notify("Saving stopped", "info")
+            self._finalize_safe_writer()
+            self._stop_serial_writer()
+            self._stop_dashboard()
 
     def closeEvent(self, *args, **kwargs):
-        """Method that gracefully closes the GUI
-
-        In the following order:
-        - Terminates the dash thread if it is running
-        - Closes AITask
-        - Closes AOTask
-        - Closes Connection to Other devices
-        - Closes the GUI.
-        """
+        self._stop_serial_workers()
         self.running = False
-        time.sleep(1)
-        if hasattr(self, "dash_thread"):
-            self.dash_thread.terminate()
-        if hasattr(self, 'NIDAQ_Device'):
-            if hasattr(self.NIDAQ_Device, 'aitask'):
-                self.NIDAQ_Device.aitask.stop()
-                self.NIDAQ_Device.aitask.close()
-                if hasattr(self.NIDAQ_Device, "aotask"):
-                    self.NIDAQ_Device.aotask.stop()
-                    self.NIDAQ_Device.aotask.close()
-                del self.NIDAQ_Device
-        super(QMainWindow, self).closeEvent(*args, **kwargs)
+        self.ContinueAcquisition = False
+        self.save_bool = False
+        self._writer_message_timer.stop()
+        if self._writer_started:
+            self._finalize_safe_writer()
+        self._stop_serial_writer()
+        self._stop_dashboard()
+        super().closeEvent(*args, **kwargs)
+
+    def _ensure_serial_workers(self):
+        if self._serial_workers_started:
+            return
+
+        # Existing Alicats become independent polling workers. A hung Alicat no
+        # longer blocks the NI acquisition loop.
+        for name, device in getattr(self, "mfcs", {}).items():
+            if name not in self.serial_devices.names():
+                self.serial_devices.register_polling(
+                    name=name,
+                    read_fn=device.GetFlows,
+                    interval_s=0.2,
+                )
+
+        self.serial_devices.start_all()
+        self._serial_workers_started = True
+
+    def _start_serial_writer(self):
+        if self._serial_writer is not None:
+            return
+        writer = SerialCsvWriter(
+            output_prefix=Path(self.common_path),
+            messages=self._writer_messages,
+        )
+        writer.start()
+        self._serial_writer = writer
+        self._serial_last_saved_sequence = {}
+        self._serial_elapsed_origin = time.monotonic()
+
+    def _stop_serial_writer(self):
+        writer = self._serial_writer
+        if writer is None:
+            return
+        writer_ok = writer.stop()
+        paths = writer.output_paths()
+        self._serial_writer = None
+        if paths:
+            self.notify(
+                "Alicat data saved separately: "
+                + ", ".join(str(path) for path in paths),
+                "info" if writer_ok else "warning",
+            )
+
+    def _snapshot_serial_devices(self):
+        for name, snapshot in self.serial_devices.snapshot().items():
+            value = snapshot.get("value")
+            if value is None:
+                continue
+            self.all_mfcData[name] = value
+            writer = self._serial_writer
+            if not self.save_bool or writer is None:
+                continue
+            sequence = int(snapshot.get("sequence", 0))
+            if sequence <= self._serial_last_saved_sequence.get(name, 0):
+                continue
+            origin = self._serial_elapsed_origin
+            read_time = snapshot.get("monotonic_time")
+            elapsed_s = 0.0 if origin is None or read_time is None else max(0.0, float(read_time) - origin)
+            if writer.put(name, snapshot, elapsed_s):
+                self._serial_last_saved_sequence[name] = sequence
+
+    def _stop_serial_workers(self):
+        self.serial_devices.stop_all()
+        self._serial_workers_started = False

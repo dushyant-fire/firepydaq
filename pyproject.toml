@@ -5,6 +5,9 @@ description = "Facilitated Interface for Recording Experiments (FIRE), a python-
 authors = ["Dushyant Chaudhari <dushyant.chaudhari@ul.org>"]
 license = "GNU General Public v3"
 readme = "README.md"
+packages = [
+{ include = "firepydaq" }
+]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.13"
@@ -26,6 +29,8 @@ PySide6 = "^6.7.2"
 PyVISA = "^1.14.1"
 jsonschema = "^4.23.0"
 setuptools = "^72.1.0"
+pyzmq = "^26.0.0"
+greenlet = "3.2.4"
 
 [tool.poetry.group.test.dependencies]
 pytest = "^8.2.2"

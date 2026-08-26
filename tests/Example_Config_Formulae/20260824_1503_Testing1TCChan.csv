@@ -1,0 +1,2 @@
+#,Panel,Device,Channel,ScaleMax,ScaleMin,Label,Type,TCType,Chart,AIRangeMin,AIRangeMax,Layout,Position,Processed_Unit,Legend
+0, 1,cDAQ3Mod1,ai0, 1, 1,Temperature1,Thermocouple, K ,Temperature, 1, 1, 1, 1, C, Amb. Temp

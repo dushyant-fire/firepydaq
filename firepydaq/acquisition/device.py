@@ -19,7 +19,7 @@
 
 from PySide6.QtWidgets import (QWidget, QGridLayout, QLabel,
                                QLineEdit, QComboBox, QHBoxLayout,
-                               QPushButton, QVBoxLayout)
+                               QPushButton, QVBoxLayout, QCheckBox)
 from PySide6.QtGui import QRegularExpressionValidator
 from PySide6.QtCore import QRegularExpression
 
@@ -32,6 +32,10 @@ from ..api.EchoThorLabsCLD101X import EchoThor
 # Communication related
 import asyncio
 import time
+import numpy as np
+import threading
+import tracemalloc
+tracemalloc.start()
 
 
 class thorlabs_laser(QWidget):
@@ -439,7 +443,169 @@ class alicat_mfc(QWidget):
         self.mfc_connection_btn.setCheckable(True)
         self.device_layout.addWidget(self.mfc_connection_btn, 3, 1)
 
+        # Pulse generation is intentionally removed from the active Alicat GUI.
+        # Hidden compatibility controls keep the existing connection methods safe.
+        self.checkpulses = QCheckBox()
+        self.checkpulses.setChecked(False)
+        self.checkpulses.hide()
+        self.pulse_btn = QPushButton("Start Pulses")
+        self.pulse_btn.setEnabled(False)
+        self.pulse_btn.hide()
+
+        # Keep this tab compact so the main acquisition region receives space.
+        self.device_widget.setMaximumHeight(210)
+        self.device_layout.setContentsMargins(10, 8, 10, 8)
+        self.device_layout.setVerticalSpacing(6)
         return self.device_widget
+
+    def toggle_pulses(self):
+        """Method to toggle sending pulses during acquisition.
+        The process is as follows:
+            - Opens a drop down for sensing square of traingular puleses.
+            - The square pulses start with a specific period and amplitude.
+            - Pulse amplitude is the amplitude above the set gas flow rate.
+            - The number of intervals for each period is
+                defined by the user (default is 3).
+            - The program then calculates the number of pulses to be sent,
+                such that the time duration for each interval reduces
+                from initial to final pulse period
+            - Subsequent pulse period are halved after the specified
+                number of intervals, until the final pule period is reached.
+        """
+        if self.checkpulses.isChecked():
+            if self.checkpulses.isChecked():
+                self.pulse_btn.setEnabled(True)
+
+            self.parent.notify("Pulses will be sent during acquisition", "info")  # noqa E501
+            self.device_layout.addWidget(QLabel("Pulse Type:"), 1, 2)
+            self.pulse_type = QComboBox()
+            self.pulse_type.addItem("Square")
+            self.pulse_type.addItem("Triangular")
+            self.pulse_type.setMaximumWidth(100)
+            self.device_layout.addWidget(self.pulse_type, 1, 3)
+            self.device_layout.addWidget(QLabel("Initial Pulse Period (s):"), 2, 2)  # noqa E501
+            self.pulse_period = QLineEdit()
+            self.pulse_period.setValidator(QRegularExpressionValidator(self.reg_ex_1))  # noqa E501
+            self.pulse_period.setText("60.0")
+            self.pulse_period.setMaximumWidth(100)
+            self.device_layout.addWidget(self.pulse_period, 2, 3)
+            self.device_layout.addWidget(QLabel("Final Pulse Period (s):"), 3, 2)  # noqa E501
+            self.final_pulse_period = QLineEdit()
+            self.final_pulse_period.setValidator(QRegularExpressionValidator(self.reg_ex_1)) # noqa E501
+            self.final_pulse_period.setText("4.0")
+            self.final_pulse_period.setMaximumWidth(100)
+            self.device_layout.addWidget(self.final_pulse_period, 3, 3)
+            self.device_layout.addWidget(QLabel("Baseline flow rate"), 4, 2)  # noqa E501
+            self.baseline_flow = QLineEdit()
+            self.baseline_flow.setValidator(QRegularExpressionValidator(self.reg_ex_1))  # noqa E501
+            self.baseline_flow.setText("0.0")
+            self.baseline_flow.setMaximumWidth(100)
+            self.device_layout.addWidget(self.baseline_flow, 4, 3)
+            self.device_layout.addWidget(QLabel("Pulse Amplitude (Above Setpoint):"), 5, 2)  # noqa E501
+            self.pulse_amplitude = QLineEdit()
+            self.pulse_amplitude.setValidator(QRegularExpressionValidator(self.reg_ex_1))  # noqa E501
+            self.pulse_amplitude.setText("10.0")
+            self.pulse_amplitude.setMaximumWidth(100)
+            self.device_layout.addWidget(self.pulse_amplitude, 5, 3)
+            self.device_layout.addWidget(QLabel("Total intervals between max and min periods:"), 6, 2)  # noqa E501
+            self.num_intervals = QLineEdit()
+            self.num_intervals.setValidator(QRegularExpressionValidator(QRegularExpression(r"[0-9]*")))  # noqa E501 int only
+            self.num_intervals.setText("4")
+            self.num_intervals.setMaximumWidth(100)
+            self.device_layout.addWidget(self.num_intervals, 6, 3)
+        else:
+            if not self.checkpulses.isChecked():
+                self.pulse_btn.setEnabled(False)
+
+            self.parent.notify("Pulses will NOT be sent during acquisition", "info")  # noqa E501
+            self.device_layout.itemAtPosition(1, 2).widget().deleteLater()
+            self.device_layout.itemAtPosition(1, 3).widget().deleteLater()
+            self.device_layout.itemAtPosition(2, 2).widget().deleteLater()
+            self.device_layout.itemAtPosition(2, 3).widget().deleteLater()
+            self.device_layout.itemAtPosition(3, 2).widget().deleteLater()
+            self.device_layout.itemAtPosition(3, 3).widget().deleteLater()
+            self.device_layout.itemAtPosition(4, 2).widget().deleteLater()
+            self.device_layout.itemAtPosition(4, 3).widget().deleteLater()
+            self.device_layout.itemAtPosition(5, 2).widget().deleteLater()
+            self.device_layout.itemAtPosition(5, 3).widget().deleteLater()
+            self.device_layout.itemAtPosition(6, 2).widget().deleteLater()
+            self.device_layout.itemAtPosition(6, 3).widget().deleteLater()
+        return
+
+    def sendPulses(self):
+        """Method to calculate square or triangular pulses 
+            and send them to the MFC.
+        """
+        if self.pulse_btn.isChecked():
+            self.pulse_btn.setText("Stop Pulses")
+            self.send_pulses = True
+            self.parent.notify("Pulses started", "info")
+
+            pulse_thread = threading.Thread(target=self.PulseThreader)  # noqa E501
+            pulse_thread.start()
+
+            # if self.pulse_type.currentText() == "Square":
+            #     # Calculate square pulses
+        else:
+            self.pulse_btn.setText("Start Pulses")
+            self.send_pulses = True
+            self.parent.notify("Pulses stopped", "info")
+
+        return
+
+    def PulseThreader(self):
+        self.pulse_btn.setText("Sending Pulses")
+        self.pulse_type_text = self.pulse_type.currentText()
+        self.initial_pp_value = float(self.pulse_period.text())
+        self.final_pp_value = float(self.final_pulse_period.text())
+        self.ampli = float(self.pulse_amplitude.text())
+        self.num_int_value = int(self.num_intervals.text())
+
+        All_periods = np.linspace(self.final_pp_value, self.initial_pp_value, self.num_int_value)  # noqa E501
+        All_periods = [int(a) if ((int(a) % 2) == 0) else int(a) + 1 for a in All_periods]  # noqa E501
+        All_periods.sort(reverse=True)
+        All_periods_list = All_periods*3  # repeating each period thrice
+        All_periods_list.sort(reverse=True)
+        print(All_periods, All_periods_list)
+        Total_time = sum([i*3 for i in All_periods])
+        print(f'Sending {self.pulse_type_text} pulses for a total of {Total_time} s')  # noqa E501
+
+        time.sleep(2)
+        time_start = time.time()
+        t = 0
+        p_counter = 0
+        while t < Total_time or p_counter > (len(All_periods_list)-1):
+
+            if self.pulse_type_text == 'Square':
+                boolean_t = sum(All_periods_list[:p_counter]) + All_periods_list[p_counter]/2  # noqa #501
+                flow_value = float(self.baseline_flow.text()) + self.ampli*int(t > boolean_t)  # noqa E501
+                self.dil_rate_input.setText(str(flow_value))
+                print(f'Setting {flow_value} for the next {All_periods_list[p_counter]/2} s')  # noqa E501
+                # self.set_flow_rate()
+                new_flow = float(self.dil_rate_input.text())
+
+                # Creating a different asyncio event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(self.MFC.flow_controller.set_flow_rate(new_flow))  # noqa E501
+
+                time.sleep(All_periods_list[p_counter]/2)
+
+                tnew = time.time()
+                t = tnew - time_start
+                print('Time elapsed', round(t, 2), All_periods_list[p_counter], p_counter)
+                if t > sum(All_periods_list[:p_counter]) + All_periods_list[p_counter]:  # noqa E501
+                    p_counter += 1
+
+            elif self.pulse_type_text == 'Triangular':
+                print('Triangular pulse setup')
+
+            else:
+                print('Error in pulse type.')
+
+        self.pulse_btn.setText("Start Pulses")
+
+        return
 
     def set_flow_rate(self):
         """Method that sets the flow rate of the Alicat MFC
@@ -448,6 +614,7 @@ class alicat_mfc(QWidget):
         new_flow = float(self.dil_rate_input.text())
         self.loop.run_until_complete(self.MFC.set_MFC_val(flow_rate=new_flow))
         self.parent.notify(str(self.dev_id) + " flow set to " + str(new_flow), "success") # noqa E501
+        return
 
     def stop_flow_rate(self):
         """Method that sets the flow-rate of the Alicat MFC
@@ -479,6 +646,9 @@ class alicat_mfc(QWidget):
                 self.loop.run_until_complete(self.MFC.set_params(com, gas=gas))
                 self.parent.notify(self.dev_id + " connected successfully", "success")  # noqa E501
 
+                if self.checkpulses.isChecked():
+                    self.pulse_btn.setEnabled(True)
+
                 self.mfc_connection_btn.setText("Stop Connection")
                 self.set_flow_btn.setEnabled(True)
                 self.stop_flow_btn.setEnabled(True)
@@ -489,6 +659,8 @@ class alicat_mfc(QWidget):
             self.parent.notify("Connection to " + self.dev_id + " ended successfully", "success")  # noqa E501
             self.mfc_connection_btn.setText("Establish Connection")
 
+            if self.checkpulses.isChecked():
+                self.pulse_btn.setEnabled(False)
             self.set_flow_btn.setEnabled(False)
             self.stop_flow_btn.setEnabled(False)
 

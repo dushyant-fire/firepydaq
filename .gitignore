@@ -23,14 +23,20 @@ jupyter_execute/
 # FIREpyDAQ specific #
 ######################
 # parquet generated during testing
+.firepydaq
 *.parquet
 dist/
 build/
 Experiment/
+02_ExperimentData*
 Calibration/
 *.log
 *.html
 *.txt
+tests/Example_Config_Formulae/*.json
+
+### DASHboard related
+DashboardError*
 
 # Paper #
 #########
