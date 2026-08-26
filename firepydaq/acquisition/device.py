@@ -28,6 +28,9 @@ from ..utilities.DAQUtils import COMports, AlicatGases
 # APIs
 from ..api.EchoAlicat import EchoController
 from ..api.EchoThorLabsCLD101X import EchoThor
+from .alicat_device import AlicatDevice
+from .abstract_device import DeviceState
+from .device_registry import DeviceRegistry
 
 # Communication related
 import asyncio
@@ -608,61 +611,55 @@ class alicat_mfc(QWidget):
         return
 
     def set_flow_rate(self):
-        """Method that sets the flow rate of the Alicat MFC
-        to the value input `dil_rate_input`.
-        """
+        runtime = self._abstract_alicat()
         new_flow = float(self.dil_rate_input.text())
-        self.loop.run_until_complete(self.MFC.set_MFC_val(flow_rate=new_flow))
-        self.parent.notify(str(self.dev_id) + " flow set to " + str(new_flow), "success") # noqa E501
-        return
+        runtime.set_flow(new_flow)
+        self.parent.notify(
+            f"{self.dev_id} flow set to {new_flow}",
+            "success",
+        )
 
     def stop_flow_rate(self):
-        """Method that sets the flow-rate of the Alicat MFC
-        to zero
-        """
-        self.loop.run_until_complete(self.MFC.set_MFC_val(flow_rate=0))
-        self.parent.notify(str(self.dev_id) + " flow set to zero", "success")
-        self.dil_rate_input.setText('0.0')
-        return
+        runtime = self._abstract_alicat()
+        runtime.stop_flow()
+        self.dil_rate_input.setText("0.0")
+        self.parent.notify(
+            f"{self.dev_id} flow set to zero",
+            "success",
+        )
 
     def GetMFCFlow(self):
         MFC_Vals = self.loop.run_until_complete(self.MFC.get_MFC_val())
         return MFC_Vals
 
     def establish_connection(self):
-        """Method that establishes connection with
-        Alicat device at `comport_input`
-        and sets the gas type to gas_input.
-        """
-        if self.mfc_connection_btn.isChecked():
-            try:
-                self.MFC = EchoController()
-                self.loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self.loop)
-                com = self.comport_input.currentText()
-                gas = self.gas_input.currentText()
-                gas = [gastxt for gastxt, gasunicode in AlicatGases.items() if bytes(gasunicode, "utf-8") == bytes(gas, "utf-8")][0]  # noqa E501
-                time.sleep(0.1)
-                self.loop.run_until_complete(self.MFC.set_params(com, gas=gas))
-                self.parent.notify(self.dev_id + " connected successfully", "success")  # noqa E501
-
-                if self.checkpulses.isChecked():
-                    self.pulse_btn.setEnabled(True)
-
+        runtime = self._abstract_alicat()
+        try:
+            if self.mfc_connection_btn.isChecked():
+                if runtime.state == DeviceState.DISCONNECTED:
+                    runtime.configure(
+                        port=self.comport_input.currentText(),
+                        gas=self._alicat_gas_code(),
+                    )
+                    runtime.connect()
+                runtime.start()
                 self.mfc_connection_btn.setText("Stop Connection")
                 self.set_flow_btn.setEnabled(True)
                 self.stop_flow_btn.setEnabled(True)
-            except Exception as e:
-                self.parent.notify(self.dev_id + " connection error" +str(e), "error")  # noqa E501
-        else:
-            self.loop.run_until_complete(self.MFC.end_connection())
-            self.parent.notify("Connection to " + self.dev_id + " ended successfully", "success")  # noqa E501
+            else:
+                runtime.disconnect()
+                self.mfc_connection_btn.setText("Establish Connection")
+                self.set_flow_btn.setEnabled(False)
+                self.stop_flow_btn.setEnabled(False)
+        except Exception as exc:
+            self.mfc_connection_btn.setChecked(False)
             self.mfc_connection_btn.setText("Establish Connection")
-
-            if self.checkpulses.isChecked():
-                self.pulse_btn.setEnabled(False)
             self.set_flow_btn.setEnabled(False)
             self.stop_flow_btn.setEnabled(False)
+            self.parent.notify(
+                f"{self.dev_id} connection error: {exc}",
+                "error",
+            )
 
     def get_name(self):
         """Method to get the id of the MFC.
@@ -710,9 +707,34 @@ class alicat_mfc(QWidget):
             raise ValueError("Data Invalid for " + self.dev_id) from v
         return self.settings
 
+    def _alicat_gas_code(self):
+        selected = self.gas_input.currentText()
+        return next(
+            (code for code, label in AlicatGases.items() if label == selected),
+            selected,
+        )
+
+    def _abstract_alicat(self):
+        registry = getattr(self.parent, "device_registry", None)
+        if registry is None:
+            registry = DeviceRegistry()
+            self.parent.device_registry = registry
+
+        runtime = registry.get(self.dev_id)
+        if runtime is None:
+            runtime = AlicatDevice(
+                name=self.dev_id,
+                port=self.comport_input.currentText(),
+                gas=self._alicat_gas_code(),
+                poll_interval_s=0.2,
+                notify=self.parent.notify,
+            )
+            registry.register(runtime)
+        return runtime
+
     def GetFlows(self):
-        # self.parent.all_mfcData[mfcname] = self.loop.run_until_complete(self.MFC.get_MFC_val())  # noqa E501
-        return self.loop.run_until_complete(self.MFC.get_MFC_val())
+        """Return the latest AbstractDevice snapshot without device I/O."""
+        return dict(self._abstract_alicat().snapshot().values)
 
 
 class mfm(QWidget):

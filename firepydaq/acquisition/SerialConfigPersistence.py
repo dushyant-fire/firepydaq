@@ -40,3 +40,7 @@ def restore_serial_devices(app, devices_payload: dict) -> None:
         values["save_frequency_hz"] = float(values.get("save_frequency_hz", 5.0))
         config = StreamingSerialConfig(**values)
         app.generic_serial_devices[name] = StreamingSerialRuntime(config, app.notify)
+        registry = getattr(app, "device_registry", None,)
+
+        if registry is not None:
+            registry.register(app.generic_serial_devices[name])

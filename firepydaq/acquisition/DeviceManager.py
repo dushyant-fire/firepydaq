@@ -116,14 +116,26 @@ class StreamingSerialRuntime(AbstractDevice):
         self.serial_port = None
         self.connected = False
         self._set_state(DeviceState.DISCONNECTED)
+        self.notify(
+            f"{self.config.name} disconnected",
+            "warning",
+        )
 
     def start(self) -> None:
+        snapshot = self.snapshot()
         if self.connected:
-            self._set_state(DeviceState.RUNNING)
+            if snapshot.has_value:
+                self._set_state(DeviceState.CONNECTED)
+            else:
+                self._set_state(DeviceState.DISCONNECTED)
+
+    def _pause_snapshot(self):
+        with self._snapshot_lock:
+            self._state = DeviceState.CONNECTED
 
     def stop(self) -> None:
         if self.connected:
-            self._set_state(DeviceState.CONNECTED)
+            self._pause_snapshot()
 
     def snapshot(self):
         return super().snapshot()
@@ -434,11 +446,19 @@ class DeviceManagerDialog(QDialog):
         if not hasattr(app, "generic_serial_devices"):
             app.generic_serial_devices = {}
 
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
-            ["Enabled", "Name", "Type", "Connection", "Reads", "Last error"]
+            ["Enabled", "Name", "Type", "Connection", "Reads", "Last Read", "Last error"]
         )
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents,)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents,)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents,)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents,)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents,)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents,)
+        header.setSectionResizeMode(6, QHeaderView.Stretch,)
+        
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.doubleClicked.connect(self.edit_selected)
@@ -489,32 +509,77 @@ class DeviceManagerDialog(QDialog):
     def refresh(self) -> None:
         rows = self._rows()
         self.table.setRowCount(len(rows))
-        for row, (name, kind, device) in enumerate(rows):
-            if kind == "Alicat MFC":
-                runtime = self._registry().get(name) if self._registry() else None
-                snapshot = runtime.snapshot() if runtime is not None else None
-                connected = (
-                    snapshot.state.value
-                    if snapshot is not None
-                    else "DISCONNECTED"
+
+        for row_index, (name, device_type, device) in enumerate(rows):
+            if device_type == "Alicat MFC":
+                registry = self._registry()
+
+                runtime = (
+                    registry.get(name)
+                    if registry is not None
+                    else None
                 )
-                reads = str(snapshot.sequence) if snapshot is not None else "0"
-                error = snapshot.error or "" if snapshot is not None else ""
+
+                snapshot = (
+                    runtime.snapshot()
+                    if runtime is not None
+                    else None
+                )
+
+                if snapshot is None:
+                    connection = DeviceState.DISCONNECTED.value
+                    reads = "0"
+                    last_read = "-"
+                    error = ""
+                else:
+                    connection = snapshot.state.value
+                    reads = str(snapshot.sequence)
+
+                    age = snapshot.age_seconds()
+
+                    last_read = (
+                        "-"
+                        if age is None
+                        else f"{age:.1f} s ago"
+                    )
+
+                    error = snapshot.error or ""
+
+                enabled = True
+
             else:
-                connected = device.connected
-                reads = str(device.snapshot().sequence)
-                error = device.last_error
-            enabled = True if kind == "Alicat MFC" else device.config.enabled
+                snapshot = device.snapshot()
+
+                connection = snapshot.state.value
+                reads = str(snapshot.sequence)
+
+                age = snapshot.age_seconds()
+
+                last_read = (
+                    "-"
+                    if age is None
+                    else f"{age:.1f} s ago"
+                )
+
+                error = snapshot.error or ""
+                enabled = device.config.enabled
+
             values = (
                 "Yes" if enabled else "No",
                 name,
-                kind,
-                "Connected" if connected else "Disconnected",
+                device_type,
+                connection,
                 reads,
+                last_read,
                 error,
             )
-            for column, value in enumerate(values):
-                self.table.setItem(row, column, QTableWidgetItem(value))
+
+            for column_index, value in enumerate(values):
+                self.table.setItem(
+                    row_index,
+                    column_index,
+                    QTableWidgetItem(value),
+                )
 
     def add_serial(self) -> None:
         dialog = StreamingSerialEditor(self)

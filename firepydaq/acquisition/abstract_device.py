@@ -20,8 +20,6 @@ class DeviceState(str, Enum):
 
 @dataclass(frozen=True)
 class DeviceSnapshot:
-    """Immutable latest-value snapshot produced by one device."""
-
     name: str
     device_type: str
     sequence: int
@@ -35,18 +33,17 @@ class DeviceSnapshot:
     def has_value(self) -> bool:
         return self.sequence > 0 and bool(self.values)
 
+    def age_seconds(self, now: Optional[float] = None) -> Optional[float]:
+        if self.monotonic_time is None:
+            return None
+        return max(0.0, (time.monotonic() if now is None else now) - self.monotonic_time)
+
 
 class AbstractDevice(ABC):
-    """Common non-blocking contract for every FirePyDAQ device.
-
-    Device-specific reads happen in the concrete implementation. Acquisition code
-    consumes only ``snapshot()``, which is thread-safe and must never perform I/O.
-    """
-
     def __init__(self, name: str, device_type: str) -> None:
         self.name = name
         self.device_type = device_type
-        self._snapshot_lock = threading.Lock()
+        self._snapshot_lock = threading.RLock()
         self._sequence = 0
         self._local_time: Optional[str] = None
         self._monotonic_time: Optional[float] = None
@@ -55,24 +52,21 @@ class AbstractDevice(ABC):
         self._error: Optional[str] = None
 
     @abstractmethod
-    def connect(self) -> None:
-        """Open communication resources. Must be idempotent."""
+    def connect(self) -> None: ...
 
     @abstractmethod
-    def disconnect(self) -> None:
-        """Close communication resources. Must be idempotent."""
+    def disconnect(self) -> None: ...
 
-    def start(self) -> None:
-        """Start acquisition activity after connection, if needed."""
-        self._set_state(DeviceState.RUNNING)
+    @abstractmethod
+    def start(self) -> None: ...
 
-    def stop(self) -> None:
-        """Stop acquisition activity without assuming process shutdown."""
-        if self.state != DeviceState.DISCONNECTED:
-            self._set_state(DeviceState.CONNECTED)
+    @abstractmethod
+    def stop(self) -> None: ...
+
+    @abstractmethod
+    def settings_to_dict(self) -> dict[str, Any]: ...
 
     def snapshot(self) -> DeviceSnapshot:
-        """Return the latest value without device I/O or blocking."""
         with self._snapshot_lock:
             return DeviceSnapshot(
                 name=self.name,
@@ -90,18 +84,12 @@ class AbstractDevice(ABC):
         with self._snapshot_lock:
             return self._state
 
-    @abstractmethod
-    def settings_to_dict(self) -> dict[str, Any]:
-        """Return JSON-serializable device configuration."""
-
     def _publish(self, values: Mapping[str, Any]) -> None:
-        now = time.monotonic()
-        local_time = datetime.now().astimezone().isoformat(timespec="milliseconds")
         with self._snapshot_lock:
             self._sequence += 1
             self._values = dict(values)
-            self._local_time = local_time
-            self._monotonic_time = now
+            self._local_time = datetime.now().astimezone().isoformat(timespec="milliseconds")
+            self._monotonic_time = time.monotonic()
             self._state = DeviceState.RUNNING
             self._error = None
 
@@ -115,3 +103,12 @@ class AbstractDevice(ABC):
             self._state = state
             if state != DeviceState.ERROR:
                 self._error = None
+
+    def _clear_snapshot(self, state: DeviceState = DeviceState.DISCONNECTED) -> None:
+        with self._snapshot_lock:
+            self._sequence = 0
+            self._local_time = None
+            self._monotonic_time = None
+            self._values = {}
+            self._state = state
+            self._error = None

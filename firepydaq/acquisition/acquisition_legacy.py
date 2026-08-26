@@ -65,6 +65,8 @@ from pathlib import Path
 from .NIAOtab import NIAOtab
 from ..api.EchoNIDAQTask import CreateDAQTask
 
+from .abstract_device import DeviceState
+
 # Error handling
 import traceback
 from ..utilities.ErrorUtils import error_logger, firepydaq_logger
@@ -100,7 +102,7 @@ class application(QMainWindow):
 
         # Set window properties
         self.setGeometry(0, 0, 900, 650)
-        self.resize(1180, 760)
+        self.resize(1180, 650)
         self.setMinimumSize(760, 520)
         self.setWindowTitle("Facilitated Interface for Recording Experiments (FIRE)")  # noqa: E501
         self.menu = MainMenu(self)
@@ -949,16 +951,38 @@ class application(QMainWindow):
                 return
 
             if self.mfcs != {}:
-                all_connected = []
-                for mfcname in self.mfcs:
-                    all_connected.append(hasattr(self.mfcs[mfcname], "loop"))
-                try:
-                    if not all(all_connected):
-                        raise ConnectionError("All MFC connections must be established before aquisition.")  # noqa E501
-                except Exception as e:
-                    self.acquisition_button.nextCheckState()
-                    self.inform_user(str(e))
-                    return
+                registry = getattr(
+                    self,
+                    "device_registry",
+                    None,
+                )
+
+                if registry is not None:
+                    disconnected = []
+                    for mfcname in self.mfcs:
+                        runtime = registry.get(
+                            mfcname
+                        )
+                        if runtime is None:
+                            disconnected.append(
+                                mfcname
+                            )
+                            continue
+                        if runtime.state == DeviceState.DISCONNECTED:
+                            disconnected.append(
+                                mfcname
+                            )
+
+                    if disconnected:
+                        try:
+                            raise ConnectionError(
+                                "Disconnected MFC devices: "
+                                + ", ".join(disconnected)
+                            )
+                        except Exception as e:
+                            self.acquisition_button.nextCheckState()
+                            self.inform_user(str(e))
+                            return
 
             self.initiate_dataArrays()
             self.acquisition_start_monotonic = time.monotonic()
@@ -986,16 +1010,16 @@ class application(QMainWindow):
             if hasattr(self, "raw_publisher"):
                 try:
                     self.raw_publisher.socket.close()
+                    del self.raw_publisher
                 except Exception:
                     pass
 
-            del self.raw_publisher
             time.sleep(1)
             self.save_bool = False
             self.run_counter = 0
             self.save_button.setEnabled(False)
-            self.notify("Acquisition stopped.", "info")
-            self.acquisition_button.setText("Start Acquisition")
+            # self.notify("Acquisition stopped.", "info")
+            # self.acquisition_button.setText("Start Acquisition")
 
     def save_data_thread(self):
         """Method that saves acquired NI data in a

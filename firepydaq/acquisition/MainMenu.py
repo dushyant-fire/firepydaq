@@ -39,6 +39,8 @@ from .device import mfm
 from .device import thorlabs_laser
 
 from ..utilities.ErrorUtils import error_logger
+from ..utilities.DAQUtils import AlicatGases
+from .alicat_device import AlicatDevice
 
 
 class MainMenu(QMenuBar):
@@ -544,6 +546,27 @@ class MainMenu(QMenuBar):
                     self.parent.device_arr[mfc] = alicat_mfc(self.parent, self.parent.device_tab_widget, mfc)  # noqa E501
                     self.parent.device_arr[mfc].load_device_data(my_dict["Gas"], str(my_dict["Rate"]), my_dict["COMPORT"])  # noqa E501
                     self.parent.mfcs[mfc] = self.parent.device_arr[mfc]
+                    if hasattr(self.parent, "device_registry",):
+                        gas = my_dict["Gas"]
+                        gas_code = next(
+                            (
+                                code
+                                for code, label
+                                in AlicatGases.items()
+                                if label == gas
+                            ),
+                            gas,
+                        )
+
+                        runtime = AlicatDevice(
+                            name=mfc,
+                            port=my_dict["COMPORT"],
+                            gas=gas_code,
+                            poll_interval_s=0.2,
+                            notify=self.parent.notify,
+                        )
+
+                        self.parent.device_registry.register(runtime, replace=True,)
             restore_serial_devices(self.parent, dev_dict)
 
     def _repopulate_settings(self, data):
