@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from .abstract_device import AbstractDevice, DeviceState
+
 try:
     import serial
     from serial.tools import list_ports
@@ -39,8 +41,6 @@ except ImportError:
 
 @dataclass
 class StreamingSerialConfig:
-    """Persistent configuration for one line-oriented serial stream."""
-
     name: str
     port: str
     baud_rate: int = 9600
@@ -52,24 +52,20 @@ class StreamingSerialConfig:
     enabled: bool = True
 
     def column_names(self) -> list[str]:
-        return [
-            item.strip()
-            for item in self.columns.split(",")
-            if item.strip()
-        ]
+        return [item.strip() for item in self.columns.split(",") if item.strip()]
 
 
-class StreamingSerialRuntime:
-    """Read and record one streaming serial device without blocking NI reads."""
+class StreamingSerialRuntime(AbstractDevice):
+    """Non-blocking line-oriented serial reader with independent CSV saving."""
 
     def __init__(
         self,
         config: StreamingSerialConfig,
         notify: Callable[[str, str], None],
-    ) -> None:
+            ) -> None:
+        super().__init__(name=config.name, device_type="streaming_serial")
         self.config = config
         self.notify = notify
-
         self.serial_port = None
         self.connected = False
         self.last_error = ""
@@ -77,10 +73,9 @@ class StreamingSerialRuntime:
         self.last_local_time = ""
         self.read_count = 0
         self.error_count = 0
-
-        self._receive_buffer = bytearray()
-        self._output_file = None
-        self._csv_writer: Optional[csv.DictWriter] = None
+        self._rx = bytearray()
+        self._file = None
+        self._writer: Optional[csv.DictWriter] = None
         self._output_path: Optional[Path] = None
         self._elapsed_origin = 0.0
         self._last_save = 0.0
@@ -88,7 +83,7 @@ class StreamingSerialRuntime:
 
     @property
     def recording(self) -> bool:
-        return self._output_file is not None
+        return self._file is not None
 
     @property
     def output_path(self) -> Optional[Path]:
@@ -96,10 +91,7 @@ class StreamingSerialRuntime:
 
     def connect(self) -> None:
         if serial is None:
-            raise RuntimeError(
-                "pyserial is required. Run: poetry add pyserial"
-            )
-
+            raise RuntimeError("pyserial is required. Run: poetry add pyserial")
         self.disconnect()
         self.serial_port = serial.Serial(
             port=self.config.port,
@@ -108,6 +100,7 @@ class StreamingSerialRuntime:
         )
         self.connected = True
         self.last_error = ""
+        self._set_state(DeviceState.CONNECTED)
         self.notify(
             f"{self.config.name} connected on {self.config.port}",
             "success",
@@ -115,15 +108,39 @@ class StreamingSerialRuntime:
 
     def disconnect(self) -> None:
         self.stop_recording()
-
         if self.serial_port is not None:
             try:
                 self.serial_port.close()
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}: {exc}"
-
         self.serial_port = None
         self.connected = False
+        self._set_state(DeviceState.DISCONNECTED)
+
+    def start(self) -> None:
+        if self.connected:
+            self._set_state(DeviceState.RUNNING)
+
+    def stop(self) -> None:
+        if self.connected:
+            self._set_state(DeviceState.CONNECTED)
+
+    def snapshot(self):
+        return super().snapshot()
+
+    def settings_to_dict(self) -> dict[str, object]:
+        return {
+            "Type": self.device_type,
+            "name": self.config.name,
+            "port": self.config.port,
+            "baud_rate": self.config.baud_rate,
+            "delimiter": self.config.delimiter,
+            "columns": self.config.columns,
+            "read_timeout_s": self.config.read_timeout_s,
+            "save_frequency_hz": self.config.save_frequency_hz,
+            "encoding": self.config.encoding,
+            "enabled": self.config.enabled,
+        }
 
     def poll(self) -> list[dict[str, object]]:
         if not self.connected or self.serial_port is None:
@@ -131,120 +148,86 @@ class StreamingSerialRuntime:
 
         rows: list[dict[str, object]] = []
         try:
-            bytes_waiting = int(
-                getattr(self.serial_port, "in_waiting", 0)
-            )
-            if bytes_waiting:
-                self._receive_buffer.extend(
-                    self.serial_port.read(bytes_waiting)
-                )
+            waiting = int(getattr(self.serial_port, "in_waiting", 0))
+            if waiting:
+                self._rx.extend(self.serial_port.read(waiting))
 
-            while b"\n" in self._receive_buffer:
-                raw_line, _, remainder = self._receive_buffer.partition(b"\n")
-                self._receive_buffer = bytearray(remainder)
-                raw_line = raw_line.rstrip(b"\r")
-                if not raw_line:
+            while b"\n" in self._rx:
+                raw, _, remainder = self._rx.partition(b"\n")
+                self._rx = bytearray(remainder)
+                raw = raw.rstrip(b"\r")
+                if not raw:
                     continue
 
-                text = raw_line.decode(
+                text = raw.decode(
                     self.config.encoding,
                     errors="replace",
                 ).strip()
                 parsed = self._parse(text)
-
                 self.last_values = parsed
                 self.last_local_time = (
-                    datetime.now()
-                    .astimezone()
-                    .isoformat(timespec="milliseconds")
+                    datetime.now().astimezone().isoformat(timespec="milliseconds")
                 )
                 self.read_count += 1
-                rows.append(parsed)
+                self._publish(parsed)
                 self._save_if_due(parsed)
+                rows.append(parsed)
 
         except Exception as exc:
             self.error_count += 1
             self.last_error = f"{type(exc).__name__}: {exc}"
+            self._set_error(exc)
             self.connected = False
 
         return rows
 
-    def start_recording(
-        self,
-        output_prefix: Path,
-        elapsed_origin: float,
-    ) -> Optional[Path]:
-        if self.recording:
+    def start_recording(self, output_prefix: Path, elapsed_origin: float) -> Path:
+        if self.recording and self._output_path is not None:
             return self._output_path
 
-        safe_device_name = _safe_name(self.config.name)
         prefix = Path(output_prefix)
-        output_path = prefix.with_name(
-            f"{prefix.name}_{safe_device_name}_serial.csv"
+        path = prefix.with_name(
+            f"{prefix.name}_{_safe_name(self.config.name)}_serial.csv"
         )
+        if path.exists():
+            raise FileExistsError(f"Serial output already exists: {path}")
 
-        if output_path.exists():
-            raise FileExistsError(
-                f"Serial output already exists: {output_path}"
-            )
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_file = output_path.open(
-            "x",
-            newline="",
-            encoding="utf-8",
-        )
-
-        fieldnames = [
-            "LocalTime",
-            "ElapsedTime",
-            *self.config.column_names(),
-        ]
-        writer = csv.DictWriter(
-            output_file,
-            fieldnames=fieldnames,
-        )
-        writer.writeheader()
-        output_file.flush()
-        os.fsync(output_file.fileno())
-
-        self._output_file = output_file
-        self._csv_writer = writer
-        self._output_path = output_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = path.open("x", newline="", encoding="utf-8")
+        fields = ["LocalTime", "ElapsedTime", *self.config.column_names()]
+        self._writer = csv.DictWriter(self._file, fieldnames=fields)
+        self._writer.writeheader()
+        self._file.flush()
+        os.fsync(self._file.fileno())
+        self._output_path = path
         self._elapsed_origin = elapsed_origin
         self._last_save = 0.0
         self._last_fsync = time.monotonic()
-        return output_path
+        return path
 
     def stop_recording(self) -> Optional[Path]:
-        """Close an active CSV and announce its final location exactly once."""
-        if self._output_file is None:
+        if self._file is None:
             return None
 
-        output_path = self._output_path
+        path = self._output_path
         try:
-            self._output_file.flush()
-            os.fsync(self._output_file.fileno())
+            self._file.flush()
+            os.fsync(self._file.fileno())
         finally:
-            self._output_file.close()
-            self._output_file = None
-            self._csv_writer = None
+            self._file.close()
+            self._file = None
+            self._writer = None
 
-        if output_path is not None:
+        if path is not None:
             self.notify(
-                f"Serial data saved: {_relative_data_path(output_path)}",
+                f"Serial data saved: {_relative_data_path(path)}",
                 "success",
             )
-
-        return output_path
+        return path
 
     def _parse(self, text: str) -> dict[str, object]:
         columns = self.config.column_names()
-        values = [
-            part.strip()
-            for part in text.split(self.config.delimiter)
-        ]
-
+        values = [part.strip() for part in text.split(self.config.delimiter)]
         if len(values) != len(columns):
             raise ValueError(
                 f"Expected {len(columns)} fields but received "
@@ -260,65 +243,46 @@ class StreamingSerialRuntime:
         return result
 
     def _save_if_due(self, values: dict[str, object]) -> None:
-        if self._csv_writer is None or self._output_file is None:
+        if self._writer is None or self._file is None:
             return
 
         now = time.monotonic()
-        save_period = 1.0 / max(
-            self.config.save_frequency_hz,
-            0.001,
-        )
-        if now - self._last_save < save_period:
+        period = 1.0 / max(self.config.save_frequency_hz, 0.001)
+        if now - self._last_save < period:
             return
 
         row = {
-            "LocalTime": (
-                datetime.now()
-                .astimezone()
-                .isoformat(timespec="milliseconds")
+            "LocalTime": datetime.now().astimezone().isoformat(
+                timespec="milliseconds"
             ),
-            "ElapsedTime": (
-                f"{max(0.0, now - self._elapsed_origin):.6f}"
-            ),
+            "ElapsedTime": f"{max(0.0, now - self._elapsed_origin):.6f}",
+            **values,
         }
-        row.update(values)
-        self._csv_writer.writerow(row)
-        self._output_file.flush()
-
+        self._writer.writerow(row)
+        self._file.flush()
         if now - self._last_fsync >= 5.0:
-            os.fsync(self._output_file.fileno())
+            os.fsync(self._file.fileno())
             self._last_fsync = now
-
         self._last_save = now
 
 
 def _safe_name(value: str) -> str:
-    cleaned = re.sub(
-        r"[^A-Za-z0-9_.-]+",
-        "_",
-        str(value),
-    ).strip("._")
-    return cleaned or "serial_device"
+    return (
+        re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("._")
+        or "serial_device"
+    )
 
 
 def _relative_data_path(path: Path) -> str:
-    """Return a path relative to ExperimentData or CalibrationData."""
-    parts = path.parts
-    for index, part in enumerate(parts):
+    for index, part in enumerate(path.parts):
         normalized = part.lower().replace("_", "").replace("-", "")
-        if (
-            "experimentdata" in normalized
-            or "calibrationdata" in normalized
-        ):
-            remainder = parts[index + 1 :]
+        if "experimentdata" in normalized or "calibrationdata" in normalized:
+            remainder = path.parts[index + 1 :]
             return str(Path(*remainder)) if remainder else path.name
-
     return str(Path(path.parent.name) / path.name)
 
 
 class StreamingSerialEditor(QDialog):
-    """Configuration dialog for one streaming serial device."""
-
     def __init__(
         self,
         parent=None,
@@ -327,61 +291,34 @@ class StreamingSerialEditor(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Streaming Serial Device")
         self.setMinimumWidth(440)
+        cfg = config or StreamingSerialConfig(name="SerialDevice", port="")
 
-        current = config or StreamingSerialConfig(
-            name="SerialDevice",
-            port="",
-        )
-
-        self.name_input = QLineEdit(current.name)
-
+        self.name_input = QLineEdit(cfg.name)
         self.port_input = QComboBox()
         self.port_input.setEditable(True)
-        available_ports = (
-            [port.device for port in list_ports.comports()]
-            if list_ports is not None
-            else []
-        )
-        self.port_input.addItems(available_ports)
-        self.port_input.setCurrentText(current.port)
+        if list_ports is not None:
+            self.port_input.addItems([port.device for port in list_ports.comports()])
+        self.port_input.setCurrentText(cfg.port)
 
         self.baud_input = QComboBox()
         self.baud_input.setEditable(True)
         self.baud_input.addItems(
-            [
-                "1200",
-                "2400",
-                "4800",
-                "9600",
-                "19200",
-                "38400",
-                "57600",
-                "115200",
-                "230400",
-            ]
+            ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400"]
         )
-        self.baud_input.setCurrentText(str(current.baud_rate))
-
-        self.delimiter_input = QLineEdit(current.delimiter)
-        self.columns_input = QLineEdit(current.columns)
-        self.columns_input.setPlaceholderText(
-            "temperature,humidity,pressure"
-        )
-
+        self.baud_input.setCurrentText(str(cfg.baud_rate))
+        self.delimiter_input = QLineEdit(cfg.delimiter)
+        self.columns_input = QLineEdit(cfg.columns)
+        self.columns_input.setPlaceholderText("temperature,humidity,pressure")
         self.timeout_input = QDoubleSpinBox()
         self.timeout_input.setRange(0.01, 10.0)
-        self.timeout_input.setDecimals(2)
-        self.timeout_input.setValue(current.read_timeout_s)
+        self.timeout_input.setValue(cfg.read_timeout_s)
         self.timeout_input.setSuffix(" s")
-
         self.save_rate_input = QDoubleSpinBox()
         self.save_rate_input.setRange(0.01, 1000.0)
-        self.save_rate_input.setDecimals(2)
-        self.save_rate_input.setValue(current.save_frequency_hz)
+        self.save_rate_input.setValue(cfg.save_frequency_hz)
         self.save_rate_input.setSuffix(" Hz")
-
         self.enabled_input = QCheckBox()
-        self.enabled_input.setChecked(current.enabled)
+        self.enabled_input.setChecked(cfg.enabled)
 
         form = QFormLayout()
         form.addRow("Device name", self.name_input)
@@ -398,7 +335,6 @@ class StreamingSerialEditor(QDialog):
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(buttons)
@@ -407,12 +343,10 @@ class StreamingSerialEditor(QDialog):
         name = self.name_input.text().strip()
         port = self.port_input.currentText().strip()
         columns = self.columns_input.text().strip()
-
         if not name or not port:
             raise ValueError("Device name and COM port are required.")
         if not [item for item in columns.split(",") if item.strip()]:
             raise ValueError("At least one column name is required.")
-
         return StreamingSerialConfig(
             name=name,
             port=port,
@@ -421,41 +355,28 @@ class StreamingSerialEditor(QDialog):
             columns=columns,
             read_timeout_s=self.timeout_input.value(),
             save_frequency_hz=self.save_rate_input.value(),
-            encoding="utf-8",
             enabled=self.enabled_input.isChecked(),
         )
 
 
 class AlicatEditor(QDialog):
-    """Compact editor backed by the existing Alicat MFC widget."""
-
-    def __init__(self, device, parent=None) -> None:
+    def __init__(self, device, registry=None, parent=None) -> None:
         super().__init__(parent)
         self.device = device
+        self.registry = registry
         self.setWindowTitle(f"Alicat MFC - {device.dev_id}")
-        self.setMinimumWidth(420)
 
         self.port_input = QComboBox()
         self.port_input.setEditable(True)
         self.port_input.addItems(
-            [
-                device.comport_input.itemText(index)
-                for index in range(device.comport_input.count())
-            ]
+            [device.comport_input.itemText(i) for i in range(device.comport_input.count())]
         )
-        self.port_input.setCurrentText(
-            device.comport_input.currentText()
-        )
-
+        self.port_input.setCurrentText(device.comport_input.currentText())
         self.gas_input = QComboBox()
         self.gas_input.addItems(
-            [
-                device.gas_input.itemText(index)
-                for index in range(device.gas_input.count())
-            ]
+            [device.gas_input.itemText(i) for i in range(device.gas_input.count())]
         )
         self.gas_input.setCurrentText(device.gas_input.currentText())
-
         self.flow_input = QLineEdit(device.dil_rate_input.text())
 
         form = QFormLayout()
@@ -464,242 +385,202 @@ class AlicatEditor(QDialog):
         form.addRow("Flow setpoint", self.flow_input)
 
         connect_button = QPushButton("Connect / Disconnect")
-        set_flow_button = QPushButton("Set flow")
-        stop_flow_button = QPushButton("Stop flow")
-
+        set_button = QPushButton("Set flow")
+        stop_button = QPushButton("Stop flow")
         connect_button.clicked.connect(self._toggle_connection)
-        set_flow_button.clicked.connect(self._set_flow)
-        stop_flow_button.clicked.connect(device.stop_flow_rate)
-
+        set_button.clicked.connect(self._set_flow)
+        stop_button.clicked.connect(device.stop_flow_rate)
         controls = QHBoxLayout()
         controls.addWidget(connect_button)
-        controls.addWidget(set_flow_button)
-        controls.addWidget(stop_flow_button)
+        controls.addWidget(set_button)
+        controls.addWidget(stop_button)
 
-        close_buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        close_buttons.rejected.connect(self.reject)
-
+        close = QDialogButtonBox(QDialogButtonBox.Close)
+        close.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addLayout(controls)
-        layout.addWidget(close_buttons)
+        layout.addWidget(close)
 
-    def _synchronize(self) -> None:
-        self.device.comport_input.setCurrentText(
-            self.port_input.currentText()
-        )
-        self.device.gas_input.setCurrentText(
-            self.gas_input.currentText()
-        )
+    def _runtime(self):
+        return self.registry.get(self.device.dev_id) if self.registry else None
+
+    def _sync(self) -> None:
+        self.device.comport_input.setCurrentText(self.port_input.currentText())
+        self.device.gas_input.setCurrentText(self.gas_input.currentText())
         self.device.dil_rate_input.setText(self.flow_input.text())
 
     def _toggle_connection(self) -> None:
-        self._synchronize()
+        self._sync()
+        runtime = self._runtime()
+        if runtime is not None:
+            runtime.stop()
         self.device.mfc_connection_btn.toggle()
         self.device.establish_connection()
+        if runtime is not None and self.device.mfc_connection_btn.isChecked():
+            runtime.start()
 
     def _set_flow(self) -> None:
-        self._synchronize()
+        self._sync()
         self.device.set_flow_rate()
 
 
 class DeviceManagerDialog(QDialog):
-    """Central management UI for Alicat and streaming serial devices."""
-
     def __init__(self, app) -> None:
         super().__init__(app)
         self.app = app
         self.setWindowTitle("Device Manager")
         self.resize(860, 480)
-
-        if not hasattr(self.app, "generic_serial_devices"):
-            self.app.generic_serial_devices = {}
+        if not hasattr(app, "generic_serial_devices"):
+            app.generic_serial_devices = {}
 
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            [
-                "Enabled",
-                "Name",
-                "Type",
-                "Connection",
-                "Reads",
-                "Last error",
-            ]
+            ["Enabled", "Name", "Type", "Connection", "Reads", "Last error"]
         )
-        self.table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
-        )
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.doubleClicked.connect(self.edit_selected)
 
-        add_button = QPushButton("Add streaming serial")
-        edit_button = QPushButton("Edit / control")
-        remove_button = QPushButton("Remove")
-        connect_button = QPushButton("Connect")
-        disconnect_button = QPushButton("Disconnect")
-        refresh_button = QPushButton("Refresh")
-
-        add_button.clicked.connect(self.add_serial)
-        edit_button.clicked.connect(self.edit_selected)
-        remove_button.clicked.connect(self.remove_selected)
-        connect_button.clicked.connect(self.connect_selected)
-        disconnect_button.clicked.connect(self.disconnect_selected)
-        refresh_button.clicked.connect(self.refresh)
-
-        controls = QHBoxLayout()
-        for button in (
-            add_button,
-            edit_button,
-            remove_button,
-            connect_button,
-            disconnect_button,
-            refresh_button,
+        buttons = QHBoxLayout()
+        for text, slot in (
+            ("Add streaming serial", self.add_serial),
+            ("Edit / control", self.edit_selected),
+            ("Remove", self.remove_selected),
+            ("Connect", self.connect_selected),
+            ("Disconnect", self.disconnect_selected),
+            ("Refresh", self.refresh),
         ):
-            controls.addWidget(button)
-        controls.addStretch()
+            button = QPushButton(text)
+            button.clicked.connect(slot)
+            buttons.addWidget(button)
+        buttons.addStretch()
 
         layout = QVBoxLayout(self)
-        layout.addWidget(
-            QLabel(
-                "Double-click a device to open its configuration and controls."
-            )
-        )
+        layout.addWidget(QLabel("Double-click a device to edit or control it."))
         layout.addWidget(self.table)
-        layout.addLayout(controls)
+        layout.addLayout(buttons)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(50)
         self.refresh()
 
-    def _device_rows(self) -> list[tuple[str, str, object]]:
-        rows: list[tuple[str, str, object]] = []
-        rows.extend(
+    def _rows(self) -> list[tuple[str, str, object]]:
+        rows = [
             (name, "Alicat MFC", device)
             for name, device in getattr(self.app, "mfcs", {}).items()
-        )
+        ]
         rows.extend(
             (name, "Streaming Serial", runtime)
             for name, runtime in self.app.generic_serial_devices.items()
         )
         return rows
 
+    def _selected(self) -> Optional[tuple[str, str, object]]:
+        index = self.table.currentRow()
+        rows = self._rows()
+        return rows[index] if 0 <= index < len(rows) else None
+
+    def _registry(self):
+        return getattr(self.app, "device_registry", None)
+
     def refresh(self) -> None:
-        rows = self._device_rows()
+        rows = self._rows()
         self.table.setRowCount(len(rows))
-
-        for row_index, (name, device_type, device) in enumerate(rows):
-            is_alicat = device_type == "Alicat MFC"
-            enabled = True if is_alicat else device.config.enabled
-            connected = (
-                hasattr(device, "loop")
-                if is_alicat
-                else device.connected
-            )
-            reads = "" if is_alicat else str(device.read_count)
-            error = "" if is_alicat else device.last_error
-
+        for row, (name, kind, device) in enumerate(rows):
+            if kind == "Alicat MFC":
+                runtime = self._registry().get(name) if self._registry() else None
+                snapshot = runtime.snapshot() if runtime is not None else None
+                connected = (
+                    snapshot.state.value
+                    if snapshot is not None
+                    else "DISCONNECTED"
+                )
+                reads = str(snapshot.sequence) if snapshot is not None else "0"
+                error = snapshot.error or "" if snapshot is not None else ""
+            else:
+                connected = device.connected
+                reads = str(device.snapshot().sequence)
+                error = device.last_error
+            enabled = True if kind == "Alicat MFC" else device.config.enabled
             values = (
                 "Yes" if enabled else "No",
                 name,
-                device_type,
+                kind,
                 "Connected" if connected else "Disconnected",
                 reads,
                 error,
             )
-            for column_index, value in enumerate(values):
-                self.table.setItem(
-                    row_index,
-                    column_index,
-                    QTableWidgetItem(value),
-                )
-
-    def _selected(self) -> Optional[tuple[str, str, object]]:
-        row = self.table.currentRow()
-        rows = self._device_rows()
-        if row < 0 or row >= len(rows):
-            return None
-        return rows[row]
+            for column, value in enumerate(values):
+                self.table.setItem(row, column, QTableWidgetItem(value))
 
     def add_serial(self) -> None:
         dialog = StreamingSerialEditor(self)
         if dialog.exec() != QDialog.Accepted:
             return
-
         try:
             config = dialog.get_config()
         except ValueError as exc:
             QMessageBox.warning(self, "Invalid device", str(exc))
             return
-
-        if (
-            config.name in self.app.generic_serial_devices
-            or config.name in getattr(self.app, "device_arr", {})
-        ):
-            QMessageBox.warning(
-                self,
-                "Duplicate name",
-                f"A device named {config.name!r} already exists.",
-            )
+        if config.name in self.app.generic_serial_devices:
+            QMessageBox.warning(self, "Duplicate name", "Device name already exists.")
             return
-
-        self.app.generic_serial_devices[config.name] = (
-            StreamingSerialRuntime(config, self.app.notify)
-        )
+        runtime = StreamingSerialRuntime(config, self.app.notify)
+        self.app.generic_serial_devices[config.name] = runtime
+        if self._registry() is not None:
+            self._registry().register(runtime)
         self.refresh()
 
     def edit_selected(self) -> None:
         selected = self._selected()
         if selected is None:
             return
-
-        name, device_type, device = selected
-        if device_type == "Alicat MFC":
-            AlicatEditor(device, self).exec()
+        name, kind, device = selected
+        if kind == "Alicat MFC":
+            AlicatEditor(device, self._registry(), self).exec()
             return
 
         dialog = StreamingSerialEditor(self, device.config)
         if dialog.exec() != QDialog.Accepted:
             return
-
-        try:
-            config = dialog.get_config()
-        except ValueError as exc:
-            QMessageBox.warning(self, "Invalid device", str(exc))
-            return
-
+        config = dialog.get_config()
         was_connected = device.connected
         device.disconnect()
+        registry = self._registry()
+        if registry is not None and registry.get(name) is device:
+            registry.unregister(name, disconnect=False)
         device.config = config
-
+        device.name = config.name
         if config.name != name:
             del self.app.generic_serial_devices[name]
             self.app.generic_serial_devices[config.name] = device
-
+        if registry is not None:
+            registry.register(device)
         if was_connected and config.enabled:
-            try:
-                device.connect()
-            except Exception as exc:
-                device.last_error = f"{type(exc).__name__}: {exc}"
-
+            device.connect()
+            device.start()
         self.refresh()
 
     def remove_selected(self) -> None:
         selected = self._selected()
         if selected is None:
             return
-
-        name, device_type, device = selected
-        if device_type != "Streaming Serial":
+        name, kind, device = selected
+        if kind != "Streaming Serial":
             QMessageBox.information(
                 self,
                 "Existing device",
                 "Use the existing Remove Devices command for Alicat removal.",
             )
             return
-
-        device.disconnect()
+        registry = self._registry()
+        if registry is not None and registry.get(name) is device:
+            registry.unregister(name, disconnect=True)
+        else:
+            device.disconnect()
         del self.app.generic_serial_devices[name]
         self.refresh()
 
@@ -707,90 +588,79 @@ class DeviceManagerDialog(QDialog):
         selected = self._selected()
         if selected is None:
             return
-
-        _name, device_type, device = selected
+        name, kind, device = selected
         try:
-            if device_type == "Streaming Serial":
+            if kind == "Streaming Serial":
                 device.connect()
-            elif not device.mfc_connection_btn.isChecked():
-                device.mfc_connection_btn.setChecked(True)
-                device.establish_connection()
+                device.start()
+            else:
+                runtime = self._registry().get(name) if self._registry() else None
+                if runtime is not None:
+                    runtime.stop()
+                if not device.mfc_connection_btn.isChecked():
+                    device.mfc_connection_btn.setChecked(True)
+                    device.establish_connection()
+                if runtime is not None:
+                    runtime.start()
         except Exception as exc:
-            QMessageBox.critical(
-                self,
-                "Connection failed",
-                str(exc),
-            )
+            QMessageBox.critical(self, "Connection failed", str(exc))
         self.refresh()
 
     def disconnect_selected(self) -> None:
         selected = self._selected()
         if selected is None:
             return
-
-        _name, device_type, device = selected
-        if device_type == "Streaming Serial":
-            device.disconnect()
-        elif device.mfc_connection_btn.isChecked():
-            device.mfc_connection_btn.setChecked(False)
-            device.establish_connection()
+        name, kind, device = selected
+        try:
+            if kind == "Streaming Serial":
+                device.disconnect()
+            else:
+                runtime = self._registry().get(name) if self._registry() else None
+                if runtime is not None:
+                    runtime.stop()
+                if device.mfc_connection_btn.isChecked():
+                    device.mfc_connection_btn.setChecked(False)
+                    device.establish_connection()
+        except Exception as exc:
+            QMessageBox.critical(self, "Disconnection failed", str(exc))
         self.refresh()
 
     def _tick(self) -> None:
         saving = bool(getattr(self.app, "save_bool", False))
-        output_prefix = getattr(self.app, "common_path", None)
-        save_begin_time = getattr(
-            self.app,
-            "save_begin_time",
-            time.time(),
-        )
-        elapsed_origin = time.monotonic() - max(
-            0.0,
-            time.time() - save_begin_time,
-        )
+        prefix = getattr(self.app, "common_path", None)
+        save_begin = getattr(self.app, "save_begin_time", time.time())
+        elapsed_origin = time.monotonic() - max(0.0, time.time() - save_begin)
 
         for runtime in tuple(self.app.generic_serial_devices.values()):
             if runtime.connected:
                 runtime.poll()
-
             if (
                 saving
-                and output_prefix
+                and prefix
                 and runtime.connected
                 and runtime.config.enabled
                 and not runtime.recording
             ):
                 try:
-                    runtime.start_recording(
-                        Path(output_prefix),
-                        elapsed_origin,
-                    )
+                    runtime.start_recording(Path(prefix), elapsed_origin)
                 except Exception as exc:
                     runtime.last_error = f"{type(exc).__name__}: {exc}"
-
             elif not saving and runtime.recording:
-                # stop_recording() performs the final flush/fsync and posts the
-                # relative output path to the application's System Log.
                 runtime.stop_recording()
 
         if self.isVisible():
             self.refresh()
 
     def closeEvent(self, event) -> None:
-        # Keep the manager and timer alive while hidden. The timer owns generic
-        # streaming reads and save-state synchronization.
         event.ignore()
         self.hide()
 
 
 def install_device_manager(app) -> None:
-    """Install and show one reusable Device Manager dialog."""
     if not hasattr(app, "generic_serial_devices"):
         app.generic_serial_devices = {}
-
     if not hasattr(app, "device_manager_dialog"):
         app.device_manager_dialog = DeviceManagerDialog(app)
-
     app.device_manager_dialog.show()
     app.device_manager_dialog.raise_()
     app.device_manager_dialog.activateWindow()

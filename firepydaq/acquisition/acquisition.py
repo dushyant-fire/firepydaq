@@ -51,6 +51,8 @@ from .acquisition_legacy import (
 
 import ctypes
 from .DeviceHealth_Chunks import DeviceHealthManager, ChunkManifestManager
+from .device_registry import DeviceRegistry
+from .polling_device import PollingDevice
 from ..utilities.firepydaq_path import (get_firepydaq_dir, get_active_run_dir, )
 from ..utilities.serial_runtime import SerialDeviceManager
 from ..utilities.serial_csv_writer import SerialCsvWriter
@@ -205,9 +207,10 @@ class application(_LegacyApplication):
         self.queue_warning_75_sent = False
         self.queue_warning_90_sent = False
 
-        self.serial_devices = SerialDeviceManager(
-            health_manager_getter=lambda: self.device_health,
-        )
+        # Unified non-blocking device registry. NI remains on its hardware-
+        # timed path during this migration; Alicat and streaming serial devices
+        # are consumed through immutable snapshots.
+        self.device_registry = DeviceRegistry()
         self._serial_workers_started = False
         self._serial_writer: Optional[SerialCsvWriter] = None
         self._serial_last_saved_sequence: dict[str, int] = {}
@@ -721,17 +724,36 @@ class application(_LegacyApplication):
         if self._serial_workers_started:
             return
 
-        # Existing Alicats become independent polling workers. A hung Alicat no
-        # longer blocks the NI acquisition loop.
+        def make_safe_read(device):
+            def _read():
+                if not hasattr(device, "MFC"):
+                    raise RuntimeError(
+                        "Alicat not connected"
+                    )
+                return device.GetFlows()
+
+            return _read
+
+        # Wrap existing Alicat widgets without changing their proven API.
         for name, device in getattr(self, "mfcs", {}).items():
-            if name not in self.serial_devices.names():
-                self.serial_devices.register_polling(
-                    name=name,
-                    read_fn=device.GetFlows,
-                    interval_s=0.2,
+            if self.device_registry.get(name) is None:
+                self.device_registry.register(
+                    PollingDevice(
+                        name=name,
+                        device_type="alicat",
+                        read_fn=make_safe_read(device),
+                        interval_s=0.2,
+                        settings_fn=device.settings_to_dict,
+                        health_manager_getter=lambda: self.device_health,
+                    )
                 )
 
-        self.serial_devices.start_all()
+        # Generic streaming runtimes already implement AbstractDevice.
+        for runtime in getattr(self, "generic_serial_devices", {}).values():
+            if self.device_registry.get(runtime.name) is None:
+                self.device_registry.register(runtime)
+
+        self.device_registry.start_all()
         self._serial_workers_started = True
 
     def _start_serial_writer(self):
@@ -761,23 +783,109 @@ class application(_LegacyApplication):
             )
 
     def _snapshot_serial_devices(self):
-        for name, snapshot in self.serial_devices.snapshot().items():
-            value = snapshot.get("value")
-            if value is None:
-                continue
-            self.all_mfcData[name] = value
-            writer = self._serial_writer
-            if not self.save_bool or writer is None:
-                continue
-            sequence = int(snapshot.get("sequence", 0))
-            if sequence <= self._serial_last_saved_sequence.get(name, 0):
-                continue
-            origin = self._serial_elapsed_origin
-            read_time = snapshot.get("monotonic_time")
-            elapsed_s = 0.0 if origin is None or read_time is None else max(0.0, float(read_time) - origin)
-            if writer.put(name, snapshot, elapsed_s):
-                self._serial_last_saved_sequence[name] = sequence
+        """
+        Acquire the latest device snapshots.
 
+        AbstractDevice snapshots are now the authoritative source
+        for acquisition-side device data.
+
+        Legacy caches are updated only for actively running Alicats
+        to maintain dashboard compatibility during migration.
+        """
+
+        snapshots = self.device_registry.snapshots()
+
+        for name, snapshot in snapshots.items():
+
+            if not snapshot.has_value:
+                continue
+
+            #
+            # Skip disconnected, error, or stale devices.
+            #
+            if snapshot.state not in (
+                DeviceState.RUNNING,
+                DeviceState.CONNECTED,
+            ):
+                continue
+
+            #
+            # Protection against stale snapshots.
+            #
+            if snapshot.monotonic_time is not None:
+
+                age = (
+                    time.monotonic()
+                    - snapshot.monotonic_time
+                )
+
+                if age > 2.0:
+                    continue
+
+            #
+            # Temporary legacy compatibility.
+            #
+            if (
+                name in getattr(self, "mfcs", {})
+                and snapshot.device_type == "alicat"
+            ):
+                self.all_mfcData[name] = dict(
+                    snapshot.values
+                )
+
+            #
+            # Alicat CSV save path.
+            #
+            writer = self._serial_writer
+
+            if (
+                not self.save_bool
+                or writer is None
+                or snapshot.device_type != "alicat"
+            ):
+                continue
+
+            last_sequence = (
+                self._serial_last_saved_sequence.get(
+                    name,
+                    0,
+                )
+            )
+
+            if snapshot.sequence <= last_sequence:
+                continue
+
+            origin = self._serial_elapsed_origin
+
+            if (
+                origin is None
+                or snapshot.monotonic_time is None
+            ):
+                elapsed_s = 0.0
+            else:
+                elapsed_s = max(
+                    0.0,
+                    snapshot.monotonic_time - origin,
+                )
+
+            writer_snapshot = {
+                "value": dict(snapshot.values),
+                "local_time": snapshot.local_time,
+                "monotonic_time": snapshot.monotonic_time,
+                "sequence": snapshot.sequence,
+                "error": snapshot.error,
+            }
+
+            if writer.put(
+                name,
+                writer_snapshot,
+                elapsed_s,
+            ):
+                self._serial_last_saved_sequence[
+                    name
+                ] = snapshot.sequence
+                
     def _stop_serial_workers(self):
-        self.serial_devices.stop_all()
+        self.device_registry.stop_all()
         self._serial_workers_started = False
+
