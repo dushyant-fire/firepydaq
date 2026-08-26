@@ -4,6 +4,7 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QLabel, QSizePolicy
 
 from .abstract_device import DeviceState
+from .MainWorkspace import install_main_workspace
 
 STATUS_COLORS = {
     DeviceState.RUNNING.value: "#16803a",
@@ -124,6 +125,7 @@ def collect_devices(app):
 
 
 def install_compact_gui(app) -> None:
+    install_main_workspace(app)
     app.device_status_label = DeviceStatusLabel(app)
     app.queue_status_label = QueueStatusLabel(app)
     app.data_health_label = DataHealthLabel(app)

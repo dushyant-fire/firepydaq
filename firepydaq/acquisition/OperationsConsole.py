@@ -158,7 +158,7 @@ class OperationsConsole(QWidget):
         event_section = SectionFrame("OPERATOR EVENTS")
         self.recent_events = QListWidget()
         self.recent_events.setMinimumHeight(55)
-        self.recent_events.setMaximumHeight(120)
+        self.recent_events.setMaximumHeight(180)
         self.recent_events.setHorizontalScrollBarPolicy(
             Qt.ScrollBarAlwaysOff
         )

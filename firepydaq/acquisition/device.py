@@ -364,7 +364,7 @@ class alicat_mfc(QWidget):
         self.parent = parent
         self.settings = {}
         self.content = self.create_alicat_mfc_content()
-        self.parent.device_tab_widget.addTab(self.content, self.dev_id)
+        # GUI placement is owned by MainWorkspace; no legacy tab.
 
     def create_alicat_mfc_content(self):
         """Method that creates Alicat MFC contents
@@ -761,7 +761,7 @@ class mfm(QWidget):
         self.parent = parent
         self.settings = {}
         self.content = self.create_mfm_content()
-        self.parent.device_tab_widget.addTab(self.content, self.dev_id)
+        # GUI placement is owned by MainWorkspace; no legacy tab.
 
     def create_mfm_content(self):
         """Method to add Mass Flow Meter content.
@@ -828,11 +828,9 @@ class mfm(QWidget):
         """
         if self.mfm_connection_btn.isChecked():
             self.mfm_connection_btn.setText("Establish Connection")
-            self.flow_rate_btn.setEnabled(True)
             self.parent.notify(self.dev_id + " connected successfully", "success")  # noqa E501
         else:
             self.mfm_connection_btn.setText("Stop Connection")
-            self.flow_rate_btn.setEnabled(False)
             self.parent.notify("Connection to " + self.dev_id + " ended successfully", "success")  # noqa E501
 
     def get_name(self):

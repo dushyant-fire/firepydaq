@@ -33,10 +33,10 @@ from .schema import schema
 from .display_data_tab import data_vis
 from .SerialConfigPersistence import restore_serial_devices
 from .DeviceManager import install_device_manager
+from .DeviceMonitor import show_device_monitor
 
 from .device import alicat_mfc
 from .device import mfm
-from .device import thorlabs_laser
 
 from ..utilities.ErrorUtils import error_logger
 from ..utilities.DAQUtils import AlicatGases
@@ -86,56 +86,12 @@ class MainMenu(QMenuBar):
             lambda: install_device_manager(self.parent)
         )
         self.devices_menu.addAction(self.manage_devices_action)
-
-        # Add Devices Menu Button
-        self.add_devices_menu = self.addMenu("Add Devices")
-
-        # Add Lasers and MFC's
-        self.add_laser_action = QAction("Add ThorlabsCLD101X", self)
-        self.add_laser_action.setObjectName("Add Laser")
-        self.add_laser_action.triggered.connect(self.add_laser)
-        self.add_devices_menu.addAction(self.add_laser_action)
-        self.add_laser_action.setShortcut("Shift+Alt+L")
-
-        self.add_mfm_action = QAction("Add MFM", self)
-        self.add_mfm_action.setObjectName("Add MFM")
-        self.add_mfm_action.triggered.connect(self.add_mfm)
-        self.add_devices_menu.addAction(self.add_mfm_action)
-        self.add_mfm_action.setShortcut("Shift+Alt+M")
-
-        self.add_mfc_action = QAction("Add MFC", self)
-        self.add_mfc_action.setObjectName("Add MFC")
-        self.add_mfc_action.triggered.connect(self.add_mfc)
-        self.add_devices_menu.addAction(self.add_mfc_action)
-        self.add_mfc_action.setShortcut("Shift+Alt+C")
-
-        # Remove Devices Menu Button
-        self.remove_devices_menu = self.addMenu("Remove Devices")
-
-        # Remove Lasers and MFC's
-        self.rem_laser_action = QAction("Remove ThorlabsCLD101X", self)
-        self.rem_laser_action.setObjectName("Remove Laser")
-        self.rem_laser_action.triggered.connect(self.remove_laser)
-        self.remove_devices_menu.addAction(self.rem_laser_action)
-        self.rem_laser_action.setShortcut("Ctrl+Shift+L")
-
-        self.rem_mfm_action = QAction("Remove MFM", self)
-        self.rem_mfm_action.setObjectName("Remove MFM")
-        self.rem_mfm_action.triggered.connect(self.remove_mfm)
-        self.remove_devices_menu.addAction(self.rem_mfm_action)
-        self.rem_mfm_action.setShortcut("Ctrl+Shift+F")
-
-        self.rem_mfc_action = QAction("Remove MFC", self)
-        self.rem_mfc_action.setObjectName("Remove MFC")
-        self.rem_mfc_action.triggered.connect(self.remove_mfc)
-        self.remove_devices_menu.addAction(self.rem_mfc_action)
-        self.rem_mfc_action.setShortcut("Ctrl+Shift+M")
-
-        self.rem_all = QAction("Remove All", self)
-        self.rem_all.setObjectName("RemAll")
-        self.rem_all.triggered.connect(self.remove_all)
-        self.remove_devices_menu.addAction(self.rem_all)
-        self.rem_all.setShortcut("Ctrl+Shift+A")
+        self.monitor_devices_action = QAction("Monitor", self)
+        self.monitor_devices_action.setShortcut("Ctrl+Shift+D")
+        self.monitor_devices_action.triggered.connect(
+            lambda: show_device_monitor(self.parent)
+        )
+        self.devices_menu.addAction(self.monitor_devices_action)
 
         # Display Data Menu Button
         self.display_data_menu = self.addMenu("Display Data")
@@ -244,206 +200,6 @@ class MainMenu(QMenuBar):
     def _report_issue(self):
         webbrowser.open("https://github.com/ulfsri/firepydaq/issues/")
 
-    def add_laser(self):
-        """ Method that opens a `DeviceNameDialog` prompting the
-        user to enter the name of the ThorlabsCLD101X to add.
-
-        - Added Device present must have a unique name.
-        - The name will be stripped of blank spaces.
-        - Application can have upto 4 ThorlabsCLD101X Lasers.
-        """
-        if not self.parent.device_arr:
-            dlg_dev_name = DeviceNameDialog("Add ThorlabsCLD101X")
-            self._style_popup(dlg_dev_name)
-            if dlg_dev_name.exec() == QDialog.Accepted:
-                dev_name = dlg_dev_name.device_name.strip()
-                if dev_name == "":
-                    self.parent.inform_user("Device name can not be empty.")
-                    return
-                self.parent.device_tab_widget = QTabWidget()
-                self.parent.main_layout.addWidget(self.parent.device_tab_widget)  # noqa E501
-                self.parent.main_layout.setStretch(0, 2)
-                self.parent.main_layout.setStretch(1, 1.5)
-                self.parent.device_arr[dev_name] = thorlabs_laser(self.parent, dev_name)  # noqa E501
-                self.parent.lasers[dev_name] = self.parent.device_arr[dev_name]
-
-        elif len(self.parent.lasers) < 4:
-            dlg_dev_name = DeviceNameDialog("Add ThorlabsCLD101X")
-            self._style_popup(dlg_dev_name)
-            if dlg_dev_name.exec() == QDialog.Accepted:
-                dev_name = dlg_dev_name.device_name.strip()
-                if dev_name == "":
-                    self.parent.inform_user("Device name can not be empty.")
-                    return
-                if dev_name in self.parent.device_arr:
-                    self.parent.inform_user("Device names must be unique.")
-                    return
-                self.parent.device_arr[dev_name] = thorlabs_laser(self.parent, dev_name)  # noqa E501
-                self.parent.lasers[dev_name] = self.parent.device_arr[dev_name]
-            else:
-                self.parent.notify("No ThorlabsCLD101X removed", "info")
-        else:
-            self.parent.inform_user("Maximum 4 ThorlabsCLD101X devices can be added.")  # noqa E501
-            return
-
-    def add_mfm(self):
-        """Method that opens a 'DeviceNameDialog' prompting
-        the user to enter the name of the
-        Mass Flow Meter to add.
-
-        - Added Device present must have a unique name.
-        - The name will be stripped of all blank spaces.
-        - Application can have upto 4 Mass Flow Meters.
-        """
-        if not self.parent.device_arr:
-            dlg_dev_name = DeviceNameDialog("Add MFM")
-            self._style_popup(dlg_dev_name)
-            if dlg_dev_name.exec() == QDialog.Accepted:
-                dev_name = dlg_dev_name.device_name.strip()
-                if dev_name == "":
-                    self.parent.inform_user("Device name can not be empty.")
-                    return
-                self.parent.device_tab_widget = QTabWidget()
-                self.parent.main_layout.addWidget(self.parent.device_tab_widget)  # noqa E501
-                self.parent.main_layout.setStretch(0, 2)
-                self.parent.main_layout.setStretch(1, 1.5)
-                self.parent.device_arr[dev_name] = mfm(self.parent, dev_name)
-                self.parent.mfms[dev_name] = self.parent.device_arr[dev_name]
-
-        elif len(self.parent.mfms) < 4:
-            dlg_dev_name = DeviceNameDialog("Add MFM")
-            self._style_popup(dlg_dev_name)
-            if dlg_dev_name.exec() == QDialog.Accepted:
-                dev_name = dlg_dev_name.device_name.strip()
-                if dev_name == "":
-                    self.parent.inform_user("Device name can not be empty.")
-                    return
-                if dev_name in self.parent.device_arr:
-                    self.parent.inform_user("Device names must be unique.")
-                    return
-                self.parent.device_arr[dev_name] = mfm(self.parent, dev_name)
-                self.parent.mfms[dev_name] = self.parent.device_arr[dev_name]
-            else:
-                self.parent.notify("No MFM removed", "info")
-        else:
-            self.parent.inform_user("Maximum 4 MFM's supported for now. Please raise an issue so we can work extend the functionality.")  # noqa E501
-            return
-
-    def add_mfc(self):
-        """ Method that opens a 'DeviceNameDialog' prompting the
-        user to enter the name of the
-        Alicat Mass Flow Controller to add.
-
-        - Added Device present must have a unique name.
-        - The name will be stripped of blank spaces.
-        - Application can have upto 4 Alicat Mass Flow Controllers.
-        """
-        if not self.parent.device_arr:
-            dlg_dev_name = DeviceNameDialog("Add MFC")
-            self._style_popup(dlg_dev_name)
-            if dlg_dev_name.exec() == QDialog.Accepted:
-                dev_name = dlg_dev_name.device_name.strip()
-                if dev_name == "":
-                    self.parent.inform_user("Device name can not be empty.")
-                    return
-                self.parent.device_tab_widget = QTabWidget()
-                self.parent.main_layout.addWidget(self.parent.device_tab_widget)  # noqa E501
-                self.parent.main_layout.setStretch(0, 2)
-                self.parent.main_layout.setStretch(1, 1.5)
-                self.parent.device_arr[dev_name] = alicat_mfc(self.parent, self.parent.device_tab_widget, dev_name)  # noqa E501
-                self.parent.mfcs[dev_name] = self.parent.device_arr[dev_name]
-
-        elif len(self.parent.mfcs) < 4:
-            dlg_dev_name = DeviceNameDialog("Add MFC")
-            self._style_popup(dlg_dev_name)
-            if dlg_dev_name.exec() == QDialog.Accepted:
-                dev_name = dlg_dev_name.device_name.strip()
-                if dev_name == "":
-                    self.parent.inform_user("Device name can not be empty.")
-                    return
-                if dev_name in self.parent.device_arr:
-                    self.parent.inform_user("Device names must be unique.")
-                    return
-                self.parent.device_arr[dev_name] = alicat_mfc(self.parent, self.parent.device_tab_widget, dev_name)  # noqa E501
-                self.parent.mfcs[dev_name] = self.parent.device_arr[dev_name]
-            else:
-                self.parent.notify("No MFC Added.", "info")
-        else:
-            self.parent.notify("Maximum 4 MFC's can be added. Please raise an issue so we can work extend the functionality.", "info")  # noqa E501
-            return
-
-    def remove_laser(self):
-        """Method that opens a 'RemoveDeviceDialog' prompting user
-        to select ThorlabsCLD101X Laser to remove.
-        """
-        if not self.parent.lasers:
-            self.parent.inform_user("No laser to remove.")
-            return
-
-        dlg_del_name = RemoveDeviceDialog(self.parent.lasers)
-        self._style_popup(dlg_del_name)
-
-        if dlg_del_name.exec() == QDialog.Accepted:
-            dev_to_del = dlg_del_name.device_to_del
-            index_to_del = list(self.parent.device_arr.keys()).index(dev_to_del)  # noqa E501
-            self.parent.device_tab_widget.removeTab(index_to_del)
-            del self.parent.device_arr[dev_to_del]
-            del self.parent.lasers[dev_to_del]
-
-            if not self.parent.device_arr:
-                self.parent.main_layout.removeWidget(self.parent.device_tab_widget)  # noqa E501
-                self.parent.device_tab_widget.deleteLater()
-        else:
-            self.parent.notify("No ThorlabsCLD101X Removed.", "info")
-
-    def remove_mfc(self):
-        """Method that opens a 'RemoveDeviceDialog' prompting user to
-        select Mass Flow Controllers to remove.
-        """
-        if not self.parent.mfcs:
-            self.parent.inform_user("No MFC to remove.")
-            return
-
-        dlg_del_name = RemoveDeviceDialog(self.parent.mfcs)
-        self._style_popup(dlg_del_name)
-
-        if dlg_del_name.exec() == QDialog.Accepted:
-            dev_to_del = dlg_del_name.device_to_del
-            index_to_del = list(self.parent.device_arr.keys()).index(dev_to_del)  # noqa E501
-            self.parent.device_tab_widget.removeTab(index_to_del)
-            del self.parent.device_arr[dev_to_del]
-            del self.parent.mfcs[dev_to_del]
-
-            if not self.parent.device_arr:
-                self.parent.main_layout.removeWidget(self.parent.device_tab_widget)  # noqa E501
-                self.parent.device_tab_widget.deleteLater()
-        else:
-            self.parent.notify("No MFC Removed.", "info")
-
-    def remove_mfm(self):
-        """Method that opens a 'RemoveDeviceDialog' prompting
-        user to select MFM to remove.
-        """
-        if not self.parent.mfms:
-            self.parent.inform_user("No MFM to remove.")
-            return
-
-        dlg_del_name = RemoveDeviceDialog(self.parent.mfms)
-        self._style_popup(dlg_del_name)
-
-        if dlg_del_name.exec() == QDialog.Accepted:
-            dev_to_del = dlg_del_name.device_to_del
-            index_to_del = list(self.parent.device_arr.keys()).index(dev_to_del)  # noqa E501
-            self.parent.device_tab_widget.removeTab(index_to_del)
-            del self.parent.device_arr[dev_to_del]
-            del self.parent.mfms[dev_to_del]
-
-            if not self.parent.device_arr:
-                self.parent.main_layout.removeWidget(self.parent.device_tab_widget)  # noqa E501
-                self.parent.device_tab_widget.deleteLater()
-        else:
-            self.parent.notify("No MFC removed", "info")
-
     def _style_popup(self, dlg):
         if self.parent.curr_mode == "Light":
             f = open(self.parent.popup_light)
@@ -516,20 +272,25 @@ class MainMenu(QMenuBar):
                 self.parent.device_arr.clear()
                 self.parent.lasers.clear()
                 self.parent.mfcs.clear()
-                self.parent.main_layout.removeWidget(self.parent.device_tab_widget)  # noqa E501
-                self.parent.device_tab_widget.deleteLater()
             self.parent.settings.clear()
             self._repopulate_settings(data)
             self._load_devices(data)
+            workspace = getattr(
+                self.parent,
+                "devices_workspace",
+                None,
+            )
+
+            if workspace is not None:
+
+                workspace.rebuild()
+                workspace._refresh_all_interfaces()
             self.parent.notify("Resolved " + str(settings_file) + " file successfully") # noqa E501
 
     def _load_devices(self, data):
         if "Devices" in data:
             dev_dict = data["Devices"]
-            self.parent.device_tab_widget = QTabWidget()
-            self.parent.main_layout.addWidget(self.parent.device_tab_widget)
-            self.parent.main_layout.setStretch(0, 2)
-            self.parent.main_layout.setStretch(1, 1.5)
+            # self.parent.device_tab_widget.setVisible(False)
             if "Lasers" in dev_dict:
                 laser_dict = dev_dict["Lasers"]
                 for laser in laser_dict.keys():
@@ -543,7 +304,7 @@ class MainMenu(QMenuBar):
                 mfc_dict = dev_dict["MFCs"]
                 for mfc in mfc_dict.keys():
                     my_dict = mfc_dict[mfc]
-                    self.parent.device_arr[mfc] = alicat_mfc(self.parent, self.parent.device_tab_widget, mfc)  # noqa E501
+                    self.parent.device_arr[mfc] = alicat_mfc(self.parent, None, mfc)  # noqa E501
                     self.parent.device_arr[mfc].load_device_data(my_dict["Gas"], str(my_dict["Rate"]), my_dict["COMPORT"])  # noqa E501
                     self.parent.mfcs[mfc] = self.parent.device_arr[mfc]
                     if hasattr(self.parent, "device_registry",):
@@ -592,8 +353,6 @@ class MainMenu(QMenuBar):
                 self.parent.mfcs.clear()
             if self.parent.lasers:
                 self.parent.lasers.clear()
-            self.parent.main_layout.removeWidget(self.parent.device_tab_widget)
-            self.parent.device_tab_widget.deleteLater()
         else:
             self.parent.inform_user("No devices added yet.")
             return
