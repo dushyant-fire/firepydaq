@@ -13,8 +13,48 @@ from .acquisition_mode import AcquisitionMode
 from .callbacks import EngineCallbacks
 from .run_state import AcquisitionState, RunState, SaveState, local_now
 from .save_manager import DataBlock
+from firepydaq.acquisition.abstract_device import DeviceState
+
+import csv
 
 
+def validate_config_columns(
+    config_path: str | Path,
+) -> None:
+
+    required = {
+        "Device",
+        "Channel",
+        "Type",
+        "TCType",
+    }
+
+    try:
+        with open(
+            config_path,
+            newline="",
+            encoding="utf-8",
+        ) as f:
+
+            reader = csv.reader(f)
+
+            headers = next(reader)
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not read config file: {exc}"
+        ) from exc
+
+    headers = {h.strip() for h in headers}
+
+    missing = required - headers
+
+    if missing:
+
+        raise RuntimeError(
+            "Missing required config columns: "
+            + ", ".join(sorted(missing))
+        )
 
 
 @dataclass(frozen=True)
@@ -41,6 +81,7 @@ class AcquisitionEngine:
         health_manager=None,
         event_logger=None,
         mode: AcquisitionMode = AcquisitionMode.FULL,
+        ni_device_factory=None,
     ) -> None:
         self.device_registry = device_registry
         self.callbacks = callbacks or EngineCallbacks()
@@ -48,6 +89,9 @@ class AcquisitionEngine:
         self.health_manager = health_manager
         self.event_logger = event_logger
         self.mode = AcquisitionMode(mode)
+        self._ni_device_factory = ni_device_factory
+        self._validated_ni_device = None
+        self._validated_ni_signature = None
         self._lock = threading.RLock()
         self._state = RunState()
         self._output_prefix: Optional[Path] = None
@@ -83,6 +127,137 @@ class AcquisitionEngine:
         self.mode = AcquisitionMode(mode)
         self.callbacks.notify(f"Acquisition mode: {self.mode.value}", "info")
 
+    @property
+    def ni_hardware_validated(self) -> bool:
+        device = self._validated_ni_device
+        return (
+            device is not None
+            and self._validated_ni_signature is not None
+            and device.state == DeviceState.CONNECTED
+        )
+
+    def invalidate_ni_validation(self) -> None:
+        """Discard a previous validation after NI settings change."""
+        device = self._validated_ni_device
+        self._validated_ni_device = None
+        self._validated_ni_signature = None
+
+        if device is None:
+            return
+        try:
+            device.disconnect()
+        except Exception:
+            pass
+        if self.device_registry.get(device.name) is device:
+            self.device_registry.unregister(device.name, disconnect=False)
+
+    def validate_ni_hardware(
+        self,
+        *,
+        parent,
+        config_path: str | Path,
+        sampling_rate_hz: float,
+        name: str = "NI Task",
+    ):
+        """Create/configure the NI device without starting acquisition."""
+        if self.acquiring or self.saving:
+            raise RuntimeError("Stop acquisition and saving before NI validation.")
+        if self.mode == AcquisitionMode.SERIAL_ONLY:
+            raise RuntimeError("NI validation is unavailable in SERIAL_ONLY mode.")
+        if self._ni_device_factory is None:
+            raise RuntimeError("No NI device factory is configured.")
+
+        config = Path(config_path).resolve()
+        validate_config_columns(config)
+        sample_rate = float(sampling_rate_hz)
+        samples_per_read = int(sample_rate)
+        if sample_rate <= 0 or samples_per_read <= 0:
+            raise ValueError("NI sampling rate must be positive.")
+
+        self.invalidate_ni_validation()
+        existing = self.device_registry.get(name)
+        if existing is not None:
+            self.device_registry.unregister(name, disconnect=True)
+
+        device = self._ni_device_factory(parent, name)
+        try:
+            device.connect(config)
+            if device.ai_counter <= 0 and device.ao_counter <= 0:
+                raise RuntimeError("NI configuration contains no AI or AO channels.")
+            device.sampling_rate = sample_rate
+            device.samples_per_read = samples_per_read
+            self.device_registry.register(device, replace=True)
+            device.start(sample_rate, samples_per_read)
+            data = device.read_block()
+            if data is None:
+                self.callbacks.notify("RuntimeError: NI task started but no data were returned. Check channel configuration", "error")
+            device.stop()
+            self._validated_ni_device = device
+            self._validated_ni_signature = (
+                str(config),
+                sample_rate,
+                samples_per_read,
+            )
+            self.update_health(force=True)
+            self.callbacks.notify("NI hardware validation passed", "success")
+            return device
+        except Exception:
+            try:
+                device.disconnect()
+            except Exception:
+                pass
+            self._validated_ni_device = None
+            self._validated_ni_signature = None
+            raise
+
+    def start_ni_acquisition(
+        self,
+        *,
+        parent,
+        config_path: str | Path,
+        sampling_rate_hz: float,
+        name: str = "NI Task",
+    ):
+        """Start the previously validated NI device."""
+        if self.mode == AcquisitionMode.SERIAL_ONLY:
+            raise RuntimeError("NI acquisition is disabled in SERIAL_ONLY mode.")
+        if self.acquiring:
+            raise RuntimeError("Acquisition is already running.")
+
+        config = Path(config_path).resolve()
+        sample_rate = float(sampling_rate_hz)
+        samples_per_read = int(sample_rate)
+        signature = (str(config), sample_rate, samples_per_read)
+
+        device = self._validated_ni_device
+        if device is None or self._validated_ni_signature != signature:
+            raise RuntimeError(
+                "NI hardware must be validated after the latest configuration "
+                "or sampling-rate change."
+            )
+        if device.state != DeviceState.CONNECTED:
+            raise RuntimeError(
+                f"Validated NI device is not connected: {device.state.value}"
+            )
+
+        try:
+            if device.ai_counter > 0:
+                device.start(sample_rate, samples_per_read)
+            if device.ao_counter > 0:
+                ao_initials = np.zeros(
+                    len(device.aolabel_map),
+                    dtype=np.float64,
+                )
+                device.StartAOContinuousTask(AO_initials=ao_initials)
+            self.start_acquisition()
+            return device
+        except Exception:
+            try:
+                device.stop()
+            except Exception:
+                pass
+            raise
+
     def start_acquisition(self) -> None:
         if self.acquiring:
             return
@@ -111,7 +286,7 @@ class AcquisitionEngine:
                 last_error=None,
             )
         )
-        self.callbacks.notify("Acquisition started.", "success")
+        self.callbacks.notify("Acquisition started", "success")
 
     def stop_acquisition(self) -> None:
         if self.saving:
@@ -140,7 +315,7 @@ class AcquisitionEngine:
         )
         self.update_health()
         self.callbacks.notify(
-            "Acquisition stopped."
+            "Acquisition stopped"
             + (" Device stop warnings: " + "; ".join(errors) if errors else ""),
             "warning" if errors else "success",
         )
@@ -213,7 +388,7 @@ class AcquisitionEngine:
             )
         )
         self.update_health()
-        self.callbacks.notify("Saving started.", "success")
+        self.callbacks.notify("Saving started", "success")
 
     def stop_save(self) -> None:
         if not self.saving:
@@ -243,7 +418,7 @@ class AcquisitionEngine:
         if error is not None:
             self.callbacks.notify(f"Save finalization failed: {error}", "error")
             raise error
-        self.callbacks.notify("Saving stopped.", "success")
+        self.callbacks.notify("Saving stopped", "success")
 
     @property
     def last_block_duration(self) -> float:

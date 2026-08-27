@@ -232,7 +232,7 @@ class StreamingSerialRuntime(AbstractDevice):
 
         if path is not None:
             self.notify(
-                f"Serial data saved: {_relative_data_path(path)}",
+                f"Serial CSV: {_relative_data_path(path)}",
                 "success",
             )
         return path

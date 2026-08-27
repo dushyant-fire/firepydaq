@@ -307,7 +307,7 @@ class SaveManager:
             self._forward_messages()
             for serial_path in serial_paths:
                 self._notify(
-                    f"Serial data saved separately: {serial_path}",
+                    f"Alicat CSV: {serial_path}",
                     "success" if serial_ok else "warning",
                 )
 
@@ -382,14 +382,13 @@ class SaveManager:
                 if writer_ok:
                     shutil.rmtree(writer.chunk_dir, ignore_errors=True)
                     self._notify(
-                        f"Finalized {rows:,} samples to {final_path}; "
-                        "temporary chunks removed.",
+                        f"Save completed: {rows:,} samples; file: {final_path}",
                         status,
                     )
                 else:
                     self._notify(
-                        f"Finalized {rows:,} samples to {final_path}; chunks retained "
-                        "because the writer reported an error.",
+                        f"Save completed with writer warning: {rows:,} samples; "
+                        f"file: {final_path}; raw chunks retained",
                         status,
                     )
 
