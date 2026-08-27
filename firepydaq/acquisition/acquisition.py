@@ -276,7 +276,7 @@ class _GuiApplication(QMainWindow):
         self.input_layout = QGridLayout()
 
         # Experimenter's Name
-        self.name_label = QLabel("Enter your name:")
+        self.name_label = QLabel("Operator name:")
         self.name_label.setMaximumWidth(200)
         self.input_layout.addWidget(self.name_label, 0, 0)
 
@@ -286,7 +286,7 @@ class _GuiApplication(QMainWindow):
         self.input_layout.addWidget(self.name_input, 0, 1)
 
         # Experimenter's Name
-        self.test_label = QLabel("Enter your Test name:")
+        self.test_label = QLabel("Test name:")
         self.test_label.setMaximumWidth(200)
         self.input_layout.addWidget(self.test_label, 2, 0)
 
@@ -302,7 +302,7 @@ class _GuiApplication(QMainWindow):
         self.input_layout.addLayout(self.test_layout, 2, 1)
 
         # Experiment Name
-        self.exp_label = QLabel("Enter your Project's name:")
+        self.exp_label = QLabel("Project name:")
         self.exp_label.setMaximumWidth(200)
         self.input_layout.addWidget(self.exp_label, 1, 0)
 
@@ -312,7 +312,7 @@ class _GuiApplication(QMainWindow):
         self.input_layout.addWidget(self.exp_input, 1, 1)
 
         # Test Name
-        self.test_type_label = QLabel("Select Experiment Type:")
+        self.test_type_label = QLabel("Experiment Type:")
         self.test_type_label.setMaximumWidth(200)
         self.input_layout.addWidget(self.test_type_label, 3, 0)
 
@@ -323,7 +323,7 @@ class _GuiApplication(QMainWindow):
         self.input_layout.addWidget(self.test_type_input, 3, 1)
 
         # Sampling Rate
-        self.sample_rate_label = QLabel("Enter Sampling Rate (Hz):")
+        self.sample_rate_label = QLabel("Sampling Rate (Hz):")
         self.sample_rate_label.setToolTip("Will only accept floats")
         self.sample_rate_label.setToolTipDuration(500)
         self.sample_rate_label.setMaximumWidth(200)
@@ -371,29 +371,31 @@ class _GuiApplication(QMainWindow):
 
         # Explicit NI hardware validation
         self.validate_ni_button = QPushButton("Validate NI Hardware")
-        self.validate_ni_button.setMaximumWidth(200)
+        self.validate_ni_button.setMaximumWidth(180)
         self.validate_ni_button.clicked.connect(self.validate_ni_hardware)
-        self.input_layout.addWidget(self.validate_ni_button, 8,0)
 
         # Buttons to begin DAQ
         self.acquisition_button = QPushButton("Start Acquisition")
-        self.input_layout.addWidget(self.acquisition_button, 8, 1)
         self.acquisition_button.setCheckable(True)
         self.acquisition_button.clicked.connect(self.acquisition_begins)
-        self.acquisition_button.setMaximumWidth(200)
+        self.acquisition_button.setMaximumWidth(180)
         self.acquisition_button.setEnabled(False)
 
         self.save_button = QPushButton("Save")
         self.save_button.setEnabled(False)
         self.save_button.setCheckable(True)
         self.save_button.clicked.connect(self.save_data)
-        self.save_button.setMaximumWidth(200)
+        self.save_button.setMaximumWidth(180)
         self.formulae_file = ""
-        self.input_layout.addWidget(self.save_button, 8, 2)
 
-        self.config_file_edit.textChanged.connect(
-            self._invalidate_ni_validation
-        )
+        # Acquisition controls row
+        self.controls_layout = QHBoxLayout()
+        self.controls_layout.addWidget(self.validate_ni_button)
+        self.controls_layout.addWidget(self.acquisition_button)
+        self.controls_layout.addWidget(self.save_button)
+        self.input_layout.addLayout(self.controls_layout, 7, 0, 1, 3,)
+
+        self.config_file_edit.textChanged.connect(self._invalidate_ni_validation)
 
         # self.save_bool = False
 
@@ -1184,10 +1186,6 @@ class application(_GuiApplication):
             callback=self.runpyDAQ,
             delay_ms=1,
         )
-
-        print("Registry:", self.device_registry)
-
-        print("Engine:", self.engine)
 
     def _on_engine_state_changed(self, state,):
         pass
