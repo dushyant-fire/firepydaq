@@ -101,6 +101,21 @@ def apply_workspace_theme(app, devices_workspace, console) -> str:
         QFrame#deviceCard {{
             margin: 2px;
         }}
+        QWidget#devicesWorkspace QComboBox::drop-down {{
+            width: 24px;
+            border-left: 1px solid {colors['border']};
+        }}
+        QWidget#devicesWorkspace QComboBox::down-arrow {{
+            image: none;
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 7px solid {colors['text']};
+            margin-right: 4px;
+        }}
+        QWidget#devicesWorkspace QComboBox {{
+            min-height: 28px;
+            padding-right: 24px;
+        }}
         """
     )
 

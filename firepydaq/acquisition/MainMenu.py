@@ -290,7 +290,6 @@ class MainMenu(QMenuBar):
     def _load_devices(self, data):
         if "Devices" in data:
             dev_dict = data["Devices"]
-            # self.parent.device_tab_widget.setVisible(False)
             if "Lasers" in dev_dict:
                 laser_dict = dev_dict["Lasers"]
                 for laser in laser_dict.keys():

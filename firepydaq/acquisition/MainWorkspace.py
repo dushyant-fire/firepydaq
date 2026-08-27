@@ -204,7 +204,7 @@ class DevicesWorkspace(QWidget):
         )
 
         port = QComboBox()
-        port.setEditable(True)
+        port.setEditable(False)
         port.addItems(
             [
                 widget.comport_input.itemText(index)
@@ -224,6 +224,7 @@ class DevicesWorkspace(QWidget):
             ]
         )
         gas.setCurrentText(widget.gas_input.currentText())
+        gas.setEditable(False)
 
         flow = QLineEdit(widget.dil_rate_input.text())
         flow.setPlaceholderText("Flow setpoint")
@@ -322,7 +323,7 @@ class DevicesWorkspace(QWidget):
         set_flow_button.clicked.connect(set_flow)
         stop_flow_button.clicked.connect(stop_flow)
         remove_button.clicked.connect(
-            lambda: self._remove_legacy_device(name, widget)
+            lambda: self._remove_device(name, widget)
         )
 
         controls = QHBoxLayout()
@@ -334,7 +335,6 @@ class DevicesWorkspace(QWidget):
 
         card.body_layout.addLayout(grid)
         card.body_layout.addLayout(controls)
-
 
         card.toggle.setChecked(expanded)
         card._set_expanded(expanded)
@@ -452,20 +452,6 @@ class DevicesWorkspace(QWidget):
 
         self._refresh_all_interfaces()
 
-    def _remove_bottom_tab_for_device(self, name: str, widget: QWidget) -> None:
-        host = getattr(self.app, "device_tab_widget", None)
-        if host is None:
-            return
-        for index in reversed(range(host.count())):
-            page = host.widget(index)
-            title = host.tabText(index).strip().lower()
-            owns_widget = page is widget or page.isAncestorOf(widget)
-            if owns_widget or title == name.strip().lower():
-                host.removeTab(index)
-                if page is not widget:
-                    page.setParent(None)
-                    page.deleteLater()
-
     def _refresh_all_interfaces(self) -> None:
         status = getattr(self.app, "device_status_label", None)
         if status is not None:
@@ -475,20 +461,11 @@ class DevicesWorkspace(QWidget):
         if manager is not None:
             manager.refresh()
 
-    def _remove_new_legacy_device_tabs(self) -> None:
-        input_page = getattr(self.app, "input_settings_widget", None)
-        if input_page is None:
-            return
-        tabs = _find_tab_widget(input_page)
-        if tabs is None:
-            return
-        _remove_legacy_device_tabs(tabs, input_page)
-
-    def _legacy_control_widgets(self) -> list[QWidget]:
-        widgets: list[QWidget] = []
-        widgets.extend(getattr(self.app, "mfcs", {}).values())
-        widgets.extend(widget for _name, widget in self._mfm_widgets())
-        return widgets
+    # def _legacy_control_widgets(self) -> list[QWidget]:
+    #     widgets: list[QWidget] = []
+    #     widgets.extend(getattr(self.app, "mfcs", {}).values())
+    #     widgets.extend(widget for _name, widget in self._mfm_widgets())
+    #     return widgets
 
     def _mfm_widgets(self) -> list[tuple[str, QWidget]]:
         widgets: list[tuple[str, QWidget]] = []
@@ -569,7 +546,7 @@ class DevicesWorkspace(QWidget):
             self.refresh_devices()
 
         connect.clicked.connect(toggle_connection)
-        remove.clicked.connect(lambda: self._remove_legacy_device(name, widget))
+        remove.clicked.connect(lambda: self._remove_device(name, widget))
 
         controls = QHBoxLayout()
         controls.addWidget(connect)
@@ -580,44 +557,6 @@ class DevicesWorkspace(QWidget):
         card.toggle.setChecked(expanded)
         card._set_expanded(expanded)
         self._insert_card(name, card)
-
-    def _legacy_action(self, object_name: str) -> Optional[QAction]:
-        for action in self.app.menuBar().findChildren(QAction):
-            if action.objectName() == object_name:
-                return action
-
-        # Removed menus may no longer be children of the visible menu bar, but
-        # MainMenu remains an application child.
-        for action in self.app.findChildren(QAction):
-            if action.objectName() == object_name:
-                return action
-        return None
-
-    def _trigger_legacy_add(self, object_name: str, label: str) -> None:
-        action = self._legacy_action(object_name)
-        if action is None:
-            QMessageBox.critical(
-                self,
-                f"Cannot add {label}",
-                f"The existing {label} creation action was not found.",
-            )
-            return
-
-        action.trigger()
-
-        def finalize_add() -> None:
-            host = getattr(self.app, "device_tab_widget", None)
-            if host is not None:
-                host.setVisible(False)
-                host.setParent(self.app)
-            self.rebuild()
-            self._refresh_all_interfaces()
-
-        QTimer.singleShot(0, finalize_add)
-        QTimer.singleShot(25, finalize_add)
-
-    # def add_mfc_device(self) -> None:
-    #     self._trigger_legacy_add("Add MFC", "MFC")
 
     def add_mfc_device(self) -> None:
         dialog = DeviceNameDialog("Add MFC")
@@ -662,10 +601,7 @@ class DevicesWorkspace(QWidget):
         self.rebuild()
         self._refresh_all_interfaces()
 
-    # def add_mfm_device(self) -> None:
-    #     self._trigger_legacy_add("Add MFM", "MFM")
-
-    def _remove_legacy_device(self, name: str, widget: QWidget) -> None:
+    def _remove_device(self, name: str, widget: QWidget) -> None:
         registry = getattr(self.app, "device_registry", None)
         if registry is not None and registry.get(name) is not None:
             registry.unregister(name, disconnect=True)
@@ -684,7 +620,6 @@ class DevicesWorkspace(QWidget):
         except Exception as exc:
             self.app.notify(f"{name} removal warning: {exc}", "warning")
 
-        self._remove_bottom_tab_for_device(name, widget)
         widget.setParent(None)
         widget.deleteLater()
         self.rebuild()
@@ -707,11 +642,7 @@ class DevicesWorkspace(QWidget):
             self.app.generic_serial_devices = devices
 
         if config.name in devices:
-            QMessageBox.warning(
-                self,
-                "Duplicate name",
-                "Device name already exists.",
-            )
+            QMessageBox.warning(self, "Duplicate name", "Device name already exists.",)
             return
 
         runtime = StreamingSerialRuntime(config, self.app.notify)
@@ -832,6 +763,7 @@ class DevicesWorkspace(QWidget):
             serial_signature,
         )
 
+
 def _find_tab_widget(widget: QWidget) -> Optional[QTabWidget]:
     current = widget.parentWidget()
     while current is not None:
@@ -857,28 +789,6 @@ def _remove_widget_from_layout(layout, target: QWidget) -> bool:
     return False
 
 
-def _remove_legacy_device_tabs(tab_widget: QTabWidget, input_page: QWidget) -> None:
-    for index in reversed(range(tab_widget.count())):
-        page = tab_widget.widget(index)
-        title = tab_widget.tabText(index).lower()
-        if page is input_page:
-            continue
-        if any(token in title for token in ("thorlabs", "laser")):
-            tab_widget.removeTab(index)
-            page.deleteLater()
-        elif any(token in title for token in ("alicat", "mfc", "mfm")):
-            tab_widget.removeTab(index)
-            page.hide()
-
-
-def _remove_legacy_device_menus(app) -> None:
-    menu_bar = app.menuBar()
-    for action in list(menu_bar.actions()):
-        text = action.text().replace("&", "").strip().lower()
-        if text in {"add devices", "remove devices"}:
-            menu_bar.removeAction(action)
-
-
 def install_main_workspace(app) -> None:
     """Install Input Settings and Devices tabs with a persistent console."""
     if hasattr(app, "devices_workspace"):
@@ -895,7 +805,6 @@ def install_main_workspace(app) -> None:
 
     _remove_widget_from_layout(input_page.layout(), console)
     console.setParent(None)
-    _remove_legacy_device_tabs(tabs, input_page)
 
     app.devices_workspace = DevicesWorkspace(app)
     tabs.addTab(app.devices_workspace, "Devices")
@@ -941,5 +850,3 @@ def install_main_workspace(app) -> None:
         if field is not None:
             field.setMinimumWidth(210)
             field.setMaximumWidth(360)
-
-    _remove_legacy_device_menus(app)
