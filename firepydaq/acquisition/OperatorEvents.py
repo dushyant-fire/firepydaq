@@ -230,9 +230,7 @@ class OperatorEventsWidget(QWidget):
         title = QLabel("Operator Events")
         title.setStyleSheet("font-weight: 600;")
 
-        self.path_label = QLabel(
-            "Start acquisition to initialize the event file."
-        )
+        self.path_label = QLabel("Start acquisition to initialize the event file.")
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.path_label.setWordWrap(False)
 
@@ -255,7 +253,7 @@ class OperatorEventsWidget(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self.draft_container)
         scroll.setMinimumHeight(64)
-        scroll.setMaximumHeight(124)
+        scroll.setMaximumHeight(140)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         layout = QVBoxLayout(self)

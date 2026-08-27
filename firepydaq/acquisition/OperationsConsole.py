@@ -158,23 +158,13 @@ class OperationsConsole(QWidget):
         event_section = SectionFrame("OPERATOR EVENTS")
         self.recent_events = QListWidget()
         self.recent_events.setMinimumHeight(55)
-        self.recent_events.setMaximumHeight(180)
-        self.recent_events.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarAlwaysOff
-        )
+        self.recent_events.setMaximumHeight(150)
+        self.recent_events.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         self.operator_events = OperatorEventsWidget(
             operator_getter=lambda: app.name_input.text().strip(),
-            output_prefix_getter=lambda: getattr(
-                app,
-                "common_path",
-                None,
-            ),
-            elapsed_origin_getter=lambda: getattr(
-                app,
-                "acquisition_start_monotonic",
-                None,
-            ),
+            output_prefix_getter=lambda: getattr(app, "common_path", None,),
+            elapsed_origin_getter=lambda: getattr(app, "acquisition_start_monotonic", None,),
             notify=app.notify,
             parent=self,
         )

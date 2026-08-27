@@ -99,17 +99,17 @@ def data_health(app, queue_level):
         return "Device warning", "WARNING", "A non-NI device reports an error; NI saving remains independent"
     if queue_level == "WARNING":
         return "Warning", "WARNING", "NI writer queue is elevated"
-    if getattr(app, "save_bool", False):
+    if (hasattr(app, "engine") and app.engine.saving):
         return "Healthy", "OK", "NI writer is healthy"
     return "Idle", "OK", "Saving is not active"
 
 
 def collect_devices(app):
     results = []
-    ni_ready = hasattr(app, "NIDAQ_Device")
-    ni_running = bool(getattr(app, "ContinueAcquisition", False))
-    ni_status = "RUNNING" if ni_running else ("CONNECTED" if ni_ready else "DISCONNECTED")
-    results.append(("NI", ni_status, "NI acquisition task"))
+    # ni_ready = hasattr(app, "NIDAQ_Device")
+    # ni_running = bool(getattr(app, "ContinueAcquisition", False))
+    # ni_status = "RUNNING" if ni_running else ("CONNECTED" if ni_ready else "DISCONNECTED")
+    # results.append(("NI", ni_status, "NI acquisition task"))
 
     registry = getattr(app, "device_registry", None)
     if registry is not None:

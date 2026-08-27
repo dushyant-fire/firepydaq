@@ -379,7 +379,7 @@ class application(QMainWindow):
         self.save_button.setMaximumWidth(200)
         self.formulae_file = ""
         self.input_layout.addWidget(self.save_button, 7, 1)
-        self.save_bool = False
+        # self.save_bool = False
 
         # Unified operations console: device health, system messages,
         # recent saved operator events, and parallel event drafts.
@@ -904,15 +904,7 @@ class application(QMainWindow):
         Once these run without any issues, the `save_button`
         is enabled, `ContinueAcquisition` boolean is set to True,
 
-
-
         """
-        # todo: Disable config, formulae, and sampling rate after acq begins.
-        # Only allow name changes after acq begins.
-        # todo: regarding notification panel: save option pop up
-        # after acq stops
-        # todo: if the dropdown is possible on notification panel,
-        # create a clear notification panel option.
         if self.acquisition_button.isChecked():
             try:
                 self.validate_fields()
@@ -950,34 +942,21 @@ class application(QMainWindow):
                 return
 
             if self.mfcs != {}:
-                registry = getattr(
-                    self,
-                    "device_registry",
-                    None,
-                )
+                registry = getattr(self, "device_registry", None,)
 
                 if registry is not None:
                     disconnected = []
                     for mfcname in self.mfcs:
-                        runtime = registry.get(
-                            mfcname
-                        )
+                        runtime = registry.get(mfcname)
                         if runtime is None:
-                            disconnected.append(
-                                mfcname
-                            )
+                            disconnected.append(mfcname)
                             continue
                         if runtime.state == DeviceState.DISCONNECTED:
-                            disconnected.append(
-                                mfcname
-                            )
+                            disconnected.append(mfcname)
 
                     if disconnected:
                         try:
-                            raise ConnectionError(
-                                "Disconnected MFC devices: "
-                                + ", ".join(disconnected)
-                            )
+                            raise ConnectionError("Disconnected MFC devices: "+ ", ".join(disconnected))
                         except Exception as e:
                             self.acquisition_button.nextCheckState()
                             self.inform_user(str(e))
@@ -993,19 +972,22 @@ class application(QMainWindow):
                         f"Operator event file was not initialized: {exc}",
                         "warning",
                     )
-            self.ContinueAcquisition = True
+            # self.ContinueAcquisition = True
             self.save_button.setEnabled(True)
             self.acquisition_button.setText("Stop Acquisition")
+
+            self.engine.start_acquisition()
+            self.notify(f"Engine Acquisition:{self.engine.state.acquisition}")
             self.notify("Validation complete. Acquisition begins.", "info")
 
             # Create publisher only once
             if not hasattr(self, "raw_publisher"):
                 self.raw_publisher = RawDataPublisher()
             self.runpyDAQ()
+            self.notify(f"Engine acquisition: {self.engine.state.acquisition}", "info",)
             self.notify("Acquiring Data . . .", "info")
         else:
-            self.ContinueAcquisition = False
-
+            # self.ContinueAcquisition = False
             if hasattr(self, "raw_publisher"):
                 try:
                     self.raw_publisher.socket.close()
@@ -1014,7 +996,10 @@ class application(QMainWindow):
                     pass
 
             time.sleep(1)
-            self.save_bool = False
+            # self.save_bool = False
+            self.engine.stop_acquisition()
+            self.notify(f"Engine acquisition: {self.engine.state.acquisition}", "info",)
+
             self.run_counter = 0
             self.save_button.setEnabled(False)
             # self.notify("Acquisition stopped.", "info")
@@ -1140,7 +1125,7 @@ class application(QMainWindow):
                         }
                     )
                 
-                if self.save_bool:
+                if self.engine.saving:
                     self._queue.put(self.ydata_new, block=True, timeout=1)
                     # As long as save does not take more than 1 s,
                     # there should be no conflict with acquisition.
@@ -1174,12 +1159,12 @@ class application(QMainWindow):
                     self.notify(text_update)
             except Exception:
                 the_type, the_value, the_traceback = sys.exc_info()
-                self.ContinueAcquisition = False
+                # self.ContinueAcquisition = False
                 # print(the_type, the_value, the_traceback)
                 self.inform_user(str(the_type) + str(the_value))
                 traceback.print_tb(the_traceback)  # noqa: E501
 
-        if self.ContinueAcquisition and self.running:
+        if self.engine.acquiring and self.running:
             QTimer.singleShot(1, self.runpyDAQ)
         else:
             self.run_counter = 0
@@ -1196,7 +1181,7 @@ class application(QMainWindow):
         """
         if self.save_button.isChecked():
             self.save_button.setText("Stop")
-            self.save_bool = True
+            # self.save_bool = True
             self.run_counter = 0
             self._queue = queue.Queue(maxsize=0)  # infinite queue size
 
@@ -1238,7 +1223,7 @@ class application(QMainWindow):
             self.notify("Saving Stopped", "info")
             if hasattr(self, "dash_thread"):
                 self.dash_thread.terminate()
-            self.save_bool = False
+            # self.save_bool = False
 
     def safe_exit(self):
         """Method that stops and closes NI AI and AO tasks.
