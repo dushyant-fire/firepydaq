@@ -52,6 +52,9 @@ class AcquisitionEngine:
         self._state = RunState()
         self._output_prefix: Optional[Path] = None
         self._last_health_write = 0.0
+        self._cycle_scheduler = None
+        self._cycle_callback = None
+        self._cycle_delay_ms = 1
 
     def set_health_manager(self, health_manager) -> None:
         """Bind or replace the health manager after application startup."""
@@ -114,6 +117,9 @@ class AcquisitionEngine:
         if self.saving:
             self.stop_save()
 
+        self._set_state(
+            replace(self.state, acquisition=AcquisitionState.IDLE,))
+
         errors = []
         for device in self._participating_devices():
             try:
@@ -139,18 +145,38 @@ class AcquisitionEngine:
             "warning" if errors else "success",
         )
 
-    def stop_ni_device(self, ni_device,):
-        try:
-            if hasattr(ni_device, "aitask"):
-                ni_device.aitask.stop()
-                ni_device.aitask.close()
+    def configure_cycle_scheduler(
+        self,
+        *,
+        scheduler,
+        callback,
+        delay_ms=1,
+    ):
 
-            if hasattr(ni_device, "aotask"):
-                ni_device.aotask.stop()
-                ni_device.aitask.close()
+        self._scheduler = scheduler
+        self._cycle_callback = callback
+        self._cycle_delay_ms = delay_ms
 
-        except Exception:
-            pass
+    def schedule_next_cycle(self):
+        if not self.acquiring:
+            return False
+
+        self._scheduler(
+            self._cycle_delay_ms,
+            self._cycle_callback,
+        )
+
+        return True
+
+    def stop_ni_device(self, ni_device):
+
+        if hasattr(ni_device, "aitask"):
+            ni_device.aitask.stop()
+            ni_device.aitask.close()
+
+        if hasattr(ni_device, "aotask"):
+            ni_device.aotask.stop()
+            ni_device.aotask.close()
 
     def start_save(self, output_prefix: str | Path, *, manifest=None) -> None:
         if self.saving:

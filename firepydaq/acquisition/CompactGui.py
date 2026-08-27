@@ -106,11 +106,6 @@ def data_health(app, queue_level):
 
 def collect_devices(app):
     results = []
-    # ni_ready = hasattr(app, "NIDAQ_Device")
-    # ni_running = bool(getattr(app, "ContinueAcquisition", False))
-    # ni_status = "RUNNING" if ni_running else ("CONNECTED" if ni_ready else "DISCONNECTED")
-    # results.append(("NI", ni_status, "NI acquisition task"))
-
     registry = getattr(app, "device_registry", None)
     if registry is not None:
         for name, snapshot in sorted(registry.snapshots().items()):

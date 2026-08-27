@@ -135,6 +135,12 @@ class application(_LegacyApplication):
             health_manager=self.device_health,
         )
 
+        self.engine.configure_cycle_scheduler(
+            scheduler=QTimer.singleShot,
+            callback=self.runpyDAQ,
+            delay_ms=1,
+        )
+
         print("Registry:", self.device_registry)
 
         print("Engine:", self.engine)
@@ -327,8 +333,10 @@ class application(_LegacyApplication):
                 self.inform_user(f"{exc_type}{exc_value}")
                 traceback.print_tb(exc_traceback)
 
-        if self.engine.acquiring and self.running:
-            QTimer.singleShot(1, self.runpyDAQ)
+        # if self.engine.acquiring and self.running:
+        #     QTimer.singleShot(1, self.runpyDAQ)
+        if self.running and self.engine.schedule_next_cycle():
+            return
         else:
             self.run_counter = 0
             if self.save_manager.active:

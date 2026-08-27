@@ -892,118 +892,118 @@ class application(QMainWindow):
         self.abs_timestamp = np.array([])
         self.timing_np = np.empty((0, 3))
 
-    def acquisition_begins(self):
-        """Method to begin acquisition for all devices.
+    # def acquisition_begins(self):
+    #     """Method to begin acquisition for all devices.
 
-        The following methods are called in order.
-        1. `validate_fields()`.
-        2. `CreateDAQTask()` in `api` module to create
-        AI and AO continuous tasks. (See `api` module for details)
-        3. `initiate_dataArrays()`
+    #     The following methods are called in order.
+    #     1. `validate_fields()`.
+    #     2. `CreateDAQTask()` in `api` module to create
+    #     AI and AO continuous tasks. (See `api` module for details)
+    #     3. `initiate_dataArrays()`
 
-        Once these run without any issues, the `save_button`
-        is enabled, `ContinueAcquisition` boolean is set to True,
+    #     Once these run without any issues, the `save_button`
+    #     is enabled, `ContinueAcquisition` boolean is set to True,
 
-        """
-        if self.acquisition_button.isChecked():
-            try:
-                self.validate_fields()
-            except Exception as e:
-                self.inform_user(str(e))
-                self.notify("Validation of input fields failed.", "error")
-                self.acquisition_button.nextCheckState()
-                return
-            self.run_counter = 0
-            if hasattr(self, 'NIDAQ_Device'):
-                self.NIDAQ_Device.aitask.stop()
-                self.NIDAQ_Device.aitask.close()
-                if hasattr(self.NIDAQ_Device, "aotask"):
-                    self.input_tab_widget.removeTab(1)
-                    self.NIDAQ_Device.aotask.stop()
-                    self.NIDAQ_Device.aotask.close()
-                del self.NIDAQ_Device
+    #     """
+    #     if self.acquisition_button.isChecked():
+    #         try:
+    #             self.validate_fields()
+    #         except Exception as e:
+    #             self.inform_user(str(e))
+    #             self.notify("Validation of input fields failed.", "error")
+    #             self.acquisition_button.nextCheckState()
+    #             return
+    #         self.run_counter = 0
+    #         # if hasattr(self, 'NIDAQ_Device'):
+    #         #     self.NIDAQ_Device.aitask.stop()
+    #         #     self.NIDAQ_Device.aitask.close()
+    #         #     if hasattr(self.NIDAQ_Device, "aotask"):
+    #         #         self.input_tab_widget.removeTab(1)
+    #         #         self.NIDAQ_Device.aotask.stop()
+    #         #         self.NIDAQ_Device.aotask.close()
+    #         #     del self.NIDAQ_Device
 
-            try:
-                self.NIDAQ_Device = NIDaqDevice(self, "NI Task")
-                self.NIDAQ_Device.CreateFromConfig(self.settings["Config File"])  # noqa: E501
+    #         try:
+    #             self.NIDAQ_Device = NIDaqDevice(self, "NI Task")
+    #             self.NIDAQ_Device.CreateFromConfig(self.settings["Config File"])  # noqa: E501
 
-                if self.NIDAQ_Device.ai_counter > 0:
-                    sample_rate = int(self.settings["Sampling Rate"])
-                    self.NIDAQ_Device.StartAIContinuousTask(sample_rate, sample_rate)  # noqa: E501
-                if self.NIDAQ_Device.ao_counter > 0:
-                    AO_initials = np.array([0 for i in self.NIDAQ_Device.aolabel_map.keys()], dtype=np.float64)  # noqa: E501
-                    self.NIDAQ_Device.StartAOContinuousTask(AO_initials=AO_initials)  # noqa: E501
-            except Exception:
-                # todo: Parse NI errors properly.. sampling rate? device name? config file error? # noqa: E501
-                self.acquisition_button.nextCheckState()
-                type, value, tb = sys.exc_info()
-                print(type, value, traceback.print_tb(tb))
-                self.inform_user("Terminating acquisition due to DAQ Connection Errors\n " + str(type) + str(value))  # noqa: E501
-                return
+    #             if self.NIDAQ_Device.ai_counter > 0:
+    #                 sample_rate = int(self.settings["Sampling Rate"])
+    #                 self.NIDAQ_Device.StartAIContinuousTask(sample_rate, sample_rate)  # noqa: E501
+    #             if self.NIDAQ_Device.ao_counter > 0:
+    #                 AO_initials = np.array([0 for i in self.NIDAQ_Device.aolabel_map.keys()], dtype=np.float64)  # noqa: E501
+    #                 self.NIDAQ_Device.StartAOContinuousTask(AO_initials=AO_initials)  # noqa: E501
+    #         except Exception:
+    #             # todo: Parse NI errors properly.. sampling rate? device name? config file error? # noqa: E501
+    #             self.acquisition_button.nextCheckState()
+    #             type, value, tb = sys.exc_info()
+    #             print(type, value, traceback.print_tb(tb))
+    #             self.inform_user("Terminating acquisition due to DAQ Connection Errors\n " + str(type) + str(value))  # noqa: E501
+    #             return
 
-            if self.mfcs != {}:
-                registry = getattr(self, "device_registry", None,)
+    #         if self.mfcs != {}:
+    #             registry = getattr(self, "device_registry", None,)
 
-                if registry is not None:
-                    disconnected = []
-                    for mfcname in self.mfcs:
-                        runtime = registry.get(mfcname)
-                        if runtime is None:
-                            disconnected.append(mfcname)
-                            continue
-                        if runtime.state == DeviceState.DISCONNECTED:
-                            disconnected.append(mfcname)
+    #             if registry is not None:
+    #                 disconnected = []
+    #                 for mfcname in self.mfcs:
+    #                     runtime = registry.get(mfcname)
+    #                     if runtime is None:
+    #                         disconnected.append(mfcname)
+    #                         continue
+    #                     if runtime.state == DeviceState.DISCONNECTED:
+    #                         disconnected.append(mfcname)
 
-                    if disconnected:
-                        try:
-                            raise ConnectionError("Disconnected MFC devices: "+ ", ".join(disconnected))
-                        except Exception as e:
-                            self.acquisition_button.nextCheckState()
-                            self.inform_user(str(e))
-                            return
+    #                 if disconnected:
+    #                     try:
+    #                         raise ConnectionError("Disconnected MFC devices: "+ ", ".join(disconnected))
+    #                     except Exception as e:
+    #                         self.acquisition_button.nextCheckState()
+    #                         self.inform_user(str(e))
+    #                         return
 
-            self.initiate_dataArrays()
-            self.acquisition_start_monotonic = time.monotonic()
-            if hasattr(self, "operator_events"):
-                try:
-                    self.operator_events.configure_for_current_test()
-                except Exception as exc:
-                    self.notify(
-                        f"Operator event file was not initialized: {exc}",
-                        "warning",
-                    )
-            # self.ContinueAcquisition = True
-            self.save_button.setEnabled(True)
-            self.acquisition_button.setText("Stop Acquisition")
+    #         self.initiate_dataArrays()
+    #         self.acquisition_start_monotonic = time.monotonic()
+    #         if hasattr(self, "operator_events"):
+    #             try:
+    #                 self.operator_events.configure_for_current_test()
+    #             except Exception as exc:
+    #                 self.notify(
+    #                     f"Operator event file was not initialized: {exc}",
+    #                     "warning",
+    #                 )
+    #         # self.ContinueAcquisition = True
+    #         self.save_button.setEnabled(True)
+    #         self.acquisition_button.setText("Stop Acquisition")
 
-            self.engine.start_acquisition()
-            self.notify(f"Engine Acquisition:{self.engine.state.acquisition}")
-            self.notify("Validation complete. Acquisition begins.", "info")
+    #         self.engine.start_acquisition()
+    #         self.notify(f"Engine Acquisition:{self.engine.state.acquisition}")
+    #         self.notify("Validation complete. Acquisition begins.", "info")
 
-            # Create publisher only once
-            if not hasattr(self, "raw_publisher"):
-                self.raw_publisher = RawDataPublisher()
-            self.runpyDAQ()
-            self.notify(f"Engine acquisition: {self.engine.state.acquisition}", "info",)
-            self.notify("Acquiring Data . . .", "info")
-        else:
-            # self.ContinueAcquisition = False
-            if hasattr(self, "raw_publisher"):
-                try:
-                    self.raw_publisher.socket.close()
-                    del self.raw_publisher
-                except Exception:
-                    pass
+    #         # Create publisher only once
+    #         if not hasattr(self, "raw_publisher"):
+    #             self.raw_publisher = RawDataPublisher()
+    #         self.runpyDAQ()
+    #         self.notify(f"Engine acquisition: {self.engine.state.acquisition}", "info",)
+    #         self.notify("Acquiring Data . . .", "info")
+    #     else:
+    #         # self.ContinueAcquisition = False
+    #         if hasattr(self, "raw_publisher"):
+    #             try:
+    #                 self.raw_publisher.socket.close()
+    #                 del self.raw_publisher
+    #             except Exception:
+    #                 pass
 
-            time.sleep(1)
-            # self.save_bool = False
-            self.engine.stop_acquisition()
-            self.notify(f"Engine acquisition: {self.engine.state.acquisition}", "info",)
+    #         time.sleep(1)
+    #         # self.save_bool = False
+    #         self.engine.stop_acquisition()
+    #         self.notify(f"Engine acquisition: {self.engine.state.acquisition}", "info",)
 
-            self.run_counter = 0
-            self.save_button.setEnabled(False)
-            # self.notify("Acquisition stopped.", "info")
-            # self.acquisition_button.setText("Start Acquisition")
+    #         self.run_counter = 0
+    #         self.save_button.setEnabled(False)
+    #         # self.notify("Acquisition stopped.", "info")
+    #         # self.acquisition_button.setText("Start Acquisition")
 
     def save_data_thread(self):
         """Method that saves acquired NI data in a
