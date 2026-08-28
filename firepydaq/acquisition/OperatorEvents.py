@@ -217,6 +217,7 @@ class OperatorEventsWidget(QWidget):
         elapsed_origin_getter,
         notify,
         parent=None,
+        publish_event=None,
     ) -> None:
         super().__init__(parent)
         self.operator_getter = operator_getter
@@ -226,6 +227,7 @@ class OperatorEventsWidget(QWidget):
         self.logger = OperatorEventLogger()
         self._drafts: list[EventDraftRow] = []
         self._next_draft_id = 1
+        self.publish_event = publish_event
 
         title = QLabel("Operator Events")
         title.setStyleSheet("font-weight: 600;")
@@ -302,6 +304,7 @@ class OperatorEventsWidget(QWidget):
         draft.saved.connect(self._save_draft)
         draft.removed.connect(self._remove_draft)
         self._drafts.append(draft)
+        
         self.draft_layout.insertWidget(
             self.draft_layout.count() - 1,
             draft,
@@ -335,6 +338,7 @@ class OperatorEventsWidget(QWidget):
             self._drafts.remove(draft)
         draft.deleteLater()
 
+        self.publish_event(row)
         self.event_saved.emit(row)
         self.notify(
             f"Operator event {row['EventNumber']} saved: {row['Message']}",

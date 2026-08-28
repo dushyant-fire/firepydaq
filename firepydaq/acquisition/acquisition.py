@@ -1008,14 +1008,18 @@ class _GuiApplication(QMainWindow):
                 try:
                     self.operator_events.configure_for_current_test()
                 except Exception as exc:
-                    self.notify(
-                        f"Operator event file was not initialized: {exc}",
-                        "warning",
-                    )
-            # self.ContinueAcquisition = True
+                    self.notify(f"Operator event file was not initialized: {exc}", "warning",)
+
             self.save_button.setEnabled(True)
             self.acquisition_button.setText("Stop Acquisition")
 
+            # Start publishing
+            self.engine.publisher.start()
+            self.engine.publish_metadata(
+                            settings=self.settings,
+                            ni_labels=self.labels_to_save,
+                            force=True,
+                        )
             # Create publisher only once
             if not hasattr(self, "raw_publisher"):
                 self.raw_publisher = RawDataPublisher()
@@ -1032,6 +1036,8 @@ class _GuiApplication(QMainWindow):
             time.sleep(1)
             # self.save_bool = False
             self.engine.stop_acquisition()
+            if self.engine.publisher is not None:
+                self.engine.publisher.stop()
             self.run_counter = 0
             self.save_button.setEnabled(False)
             # self.acquisition_button.setText("Start Acquisition")
@@ -1150,6 +1156,7 @@ class application(_GuiApplication):
         self._dashboard_process = None
         self.queue_warning_75_sent = False
         self.queue_warning_90_sent = False
+        self._latest_ni_values = None
 
         # Unified non-blocking device registry. NI remains on its hardware-
         # timed path during this migration; Alicat and streaming serial devices
@@ -1186,6 +1193,11 @@ class application(_GuiApplication):
             callback=self.runpyDAQ,
             delay_ms=1,
         )
+
+        from firepydaq.telemetry.mqtt_publisher import (MqttPublisher,)
+        publisher = MqttPublisher(notify=self.notify,)
+
+        self.engine.publisher = publisher
 
     def _on_engine_state_changed(self, state,):
         pass
@@ -1278,10 +1290,26 @@ class application(_GuiApplication):
         )
 
         if cycle is not None:
-            try:
-                self.ActualSamplingRate = float(
-                    self.NIDAQ_Device.aitask.timing.samp_clk_rate
+            self._latest_ni_values = cycle.values
+
+        if self.engine.publisher is not None:
+            snapshots = self.engine.collect_snapshots()
+
+            values = (
+                self.engine.publisher.payload_builder.live_values(
+                    ni_labels=self.labels_to_save,
+                    ni_values=self._latest_ni_values,
+                    snapshots=snapshots,
                 )
+            )
+
+            self.engine.publisher.publish_live(values)
+            health = (self.engine.publisher.payload_builder.health(snapshots))
+            self.engine.publisher.publish_health(health)
+
+        if cycle is not None:
+            try:
+                self.ActualSamplingRate = float(self.NIDAQ_Device.aitask.timing.samp_clk_rate)
                 self.xdata_new = cycle.acquisition_time
                 self.ydata_new = cycle.values
                 self.abs_timestamp = list(cycle.absolute_time)
@@ -1385,6 +1413,7 @@ class application(_GuiApplication):
             self.acquisition_button.setText("Start Acquisition")
             self.save_button.setEnabled(False)
             self.elapsed_time_offset = 0
+            self._latest_ni_values = None
             self._stop_dashboard()
 
     @error_logger("SaveData")
@@ -1511,6 +1540,8 @@ class application(_GuiApplication):
         if self.save_manager.active:
             self._finalize_safe_writer()
         self.engine.invalidate_ni_validation()
+        if self.engine.publisher is not None:
+            self.engine.publisher.stop()
         self._stop_dashboard()
         super().closeEvent(*args, **kwargs)
 
@@ -1534,7 +1565,7 @@ class application(_GuiApplication):
                         name=name,
                         port=widget.comport_input.currentText(),
                         gas=gas_code,
-                        poll_interval_s=0.2,
+                        poll_interval_s=2.0,
                         notify=self.notify,
                     )
                 )

@@ -629,6 +629,10 @@ class alicat_mfc(QWidget):
         )
 
     def GetMFCFlow(self):
+        print(
+            "LEGACY DEVICE POLL",
+            time.time(),
+        )
         MFC_Vals = self.loop.run_until_complete(self.MFC.get_MFC_val())
         return MFC_Vals
 

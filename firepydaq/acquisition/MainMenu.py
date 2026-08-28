@@ -322,7 +322,7 @@ class MainMenu(QMenuBar):
                             name=mfc,
                             port=my_dict["COMPORT"],
                             gas=gas_code,
-                            poll_interval_s=0.2,
+                            poll_interval_s=0.5,
                             notify=self.parent.notify,
                         )
 

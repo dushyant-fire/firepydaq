@@ -167,6 +167,7 @@ class OperationsConsole(QWidget):
             elapsed_origin_getter=lambda: getattr(app, "acquisition_start_monotonic", None,),
             notify=app.notify,
             parent=self,
+            publish_event=self.publish_operator_event,
         )
         self.operator_events.event_saved.connect(self._on_event_saved)
         self.operator_events.event_file_changed.connect(
@@ -308,3 +309,18 @@ class OperationsConsole(QWidget):
 
     def setAlignment(self, *_args, **_kwargs) -> None:
         pass
+
+    def publish_operator_event(self, row,):
+        publisher = getattr(self.app.engine, "publisher", None,)
+
+        if publisher is not None:
+            publisher.publish_event(
+                text=row["Message"],
+                event_type="operator",
+                details={
+                    "event_number": row["EventNumber"],
+                    "category": row["Category"],
+                    "operator": row["Operator"],
+                    "elapsed_time": row["ElapsedTime"],
+                },
+            )

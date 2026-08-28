@@ -14,6 +14,7 @@ from .callbacks import EngineCallbacks
 from .run_state import AcquisitionState, RunState, SaveState, local_now
 from .save_manager import DataBlock
 from firepydaq.acquisition.abstract_device import DeviceState
+from firepydaq.telemetry.mqtt_publisher import (MqttPublisher,)
 
 import csv
 
@@ -82,6 +83,7 @@ class AcquisitionEngine:
         event_logger=None,
         mode: AcquisitionMode = AcquisitionMode.FULL,
         ni_device_factory=None,
+        publisher=None,
     ) -> None:
         self.device_registry = device_registry
         self.callbacks = callbacks or EngineCallbacks()
@@ -99,6 +101,8 @@ class AcquisitionEngine:
         self._cycle_scheduler = None
         self._cycle_callback = None
         self._cycle_delay_ms = 1
+        self.publisher = publisher
+        self._publisher_metadata_dirty = True
 
     def set_health_manager(self, health_manager) -> None:
         """Bind or replace the health manager after application startup."""
@@ -588,18 +592,6 @@ class AcquisitionEngine:
     def snapshots(self):
         return self.collect_snapshots()
 
-    # def update_health(self) -> None:
-    #     manager = self.health_manager
-    #     if manager is None:
-    #         return
-    #     write_registry = getattr(manager, "write_registry", None)
-    #     if callable(write_registry):
-    #         write_registry(self.device_registry)
-    #         return
-    #     write = getattr(manager, "write", None)
-    #     if callable(write):
-    #         write()
-
     def update_health(self, force=False):
         manager = self.health_manager
         if manager is None:
@@ -615,15 +607,34 @@ class AcquisitionEngine:
         write_registry = getattr(manager, "write_registry", None,)
 
         if callable(write_registry):
-            write_registry(
-                self.device_registry
-            )
+            write_registry(self.device_registry)
             return
 
         write = getattr(manager, "write", None,)
 
         if callable(write):
             write()
+
+    def publish_metadata(self, *, settings, ni_labels, ni_units=None, force=False,):
+        if self.publisher is None:
+            return False
+
+        snapshots = self.collect_snapshots()
+
+        experiment, channels = (
+            self.publisher.payload_builder.metadata(
+                settings=settings,
+                ni_labels=ni_labels,
+                ni_units=ni_units,
+                snapshots=snapshots,
+            )
+        )
+
+        return self.publisher.publish_metadata(
+            experiment=experiment,
+            channels=channels,
+            force=force,
+        )
 
     def _participating_devices(self):
         return [

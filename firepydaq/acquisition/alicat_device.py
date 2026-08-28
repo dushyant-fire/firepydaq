@@ -19,13 +19,13 @@ class AlicatDevice(AbstractDevice):
         name: str,
         port: str,
         gas: str,
-        poll_interval_s: float = 0.2,
+        poll_interval_s: float = 0.5,
         notify: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         super().__init__(name=name, device_type="alicat")
         self.port = port
         self.gas = gas
-        self.poll_interval_s = max(float(poll_interval_s), 0.05)
+        self.poll_interval_s = max(float(poll_interval_s), 0.1)
         self.notify = notify
 
         self._io_lock = threading.RLock()
@@ -33,6 +33,13 @@ class AlicatDevice(AbstractDevice):
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._controller: Optional[EchoController] = None
+
+        print(
+            "NEW ALICAT DEVICE:",
+            name,
+            "poll_interval_s =",
+            poll_interval_s,
+        )
 
     @property
     def connected(self) -> bool:
@@ -115,6 +122,12 @@ class AlicatDevice(AbstractDevice):
             self._set_state(DeviceState.CONNECTED)
 
     def set_flow(self, flow_rate: float) -> None:
+        print(
+            "SET:",
+            self.name,
+            flow_rate,
+            time.time(),
+        )
         with self._io_lock:
             loop, controller = self._require_transport_locked()
             loop.run_until_complete(
@@ -142,15 +155,28 @@ class AlicatDevice(AbstractDevice):
             try:
                 with self._io_lock:
                     loop, controller = self._require_transport_locked()
+                    print(
+                        "ALICAT POLL:",
+                        self.name,
+                        time.time(),
+                    )
                     values = loop.run_until_complete(controller.get_MFC_val())
                 self._publish(dict(values))
             except Exception as exc:
                 if self._stop_event.is_set():
                     return
-                self._set_error(exc)
+                # self._set_error(exc)
+                print(
+                    "ALICAT EXCEPTION:",
+                    repr(exc)
+                )
                 self._notify(f"{self.name} read error: {exc}", "warning")
-                return
+                continue
 
+            print(
+                "ALICAT INTERVAL:",
+                self.poll_interval_s
+            )
             next_read = max(
                 next_read + self.poll_interval_s,
                 time.monotonic(),
