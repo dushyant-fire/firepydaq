@@ -322,5 +322,6 @@ class OperationsConsole(QWidget):
                     "category": row["Category"],
                     "operator": row["Operator"],
                     "elapsed_time": row["ElapsedTime"],
+                    "timestamp": row["LocalTime"],
                 },
             )

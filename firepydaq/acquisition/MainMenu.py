@@ -24,6 +24,7 @@ import webbrowser
 from jsonschema import validate
 import json
 import os
+from pathlib import Path
 
 from .DeviceNameDialog import DeviceNameDialog
 from .RemoveDeviceDialog import RemoveDeviceDialog
@@ -59,7 +60,6 @@ class MainMenu(QMenuBar):
         self.parent = parent
         # File Menu Button
         self.file_menu = self.addMenu("File")
-        self.smell = "Bar"
         # Loading Action
         self.load_daq_action = QAction("Load DAQ Configuration", self)
         self.load_daq_action.setObjectName("LoadJson")
@@ -263,8 +263,12 @@ class MainMenu(QMenuBar):
             except Exception as e:
                 self.parent.inform_user(str(e))
             my_schema = schema
+            # Keep compatibility with the existing schema until it explicitly
+            # includes the optional Acquisition Mode property.
+            validation_data = dict(data)
+            validation_data.pop("Acquisition Mode", None)
             try:
-                validate(instance=data, schema=my_schema)
+                validate(instance=validation_data, schema=my_schema)
             except Exception as e:
                 self.parent.inform_user("Unable to resolve json file.\n"+str(e))  # noqa E501
                 return
@@ -272,6 +276,15 @@ class MainMenu(QMenuBar):
                 self.parent.device_arr.clear()
                 self.parent.lasers.clear()
                 self.parent.mfcs.clear()
+            if hasattr(self.parent, "generic_serial_devices"):
+                for runtime in self.parent.generic_serial_devices.values():
+                    try:
+                        runtime.disconnect()
+                    except Exception:
+                        pass
+                self.parent.generic_serial_devices.clear()
+            if hasattr(self.parent, "device_registry"):
+                self.parent.device_registry.disconnect_all()
             self.parent.settings.clear()
             self._repopulate_settings(data)
             self._load_devices(data)
@@ -285,7 +298,7 @@ class MainMenu(QMenuBar):
 
                 workspace.rebuild()
                 workspace._refresh_all_interfaces()
-            self.parent.notify("Resolved " + str(settings_file) + " file successfully") # noqa E501
+            self.parent.notify("Configuration loaded: " + Path(dlg_load.file_name).name, "success") # noqa E501
 
     def _load_devices(self, data):
         if "Devices" in data:
@@ -331,13 +344,19 @@ class MainMenu(QMenuBar):
 
     def _repopulate_settings(self, data):
         self.parent.settings["Name"] = data["Name"]
-        self.parent.settings["Experiment Name"] = data["Experiment Name"]
+        self.parent.settings["Project Name"] = data["Project Name"]
+        self.parent.settings["Series Name"] = data.get("Series Name", "",)
         self.parent.settings["Test Name"] = data["Test Name"]
-        self.parent.settings["Sampling Rate"] = data["Sampling Rate"]
-        self.parent.settings["Formulae File"] = data["Formulae File"]
+        self.parent.settings["Sampling Rate"] = data.get("Sampling Rate", 0.0)
+        self.parent.settings["Formulae File"] = data.get("Formulae File", "")
         self.parent.settings["Experiment Type"] = data["Experiment Type"]
-        self.parent.settings["Config File"] = data["Config File"]
+        self.parent.settings["Config File"] = data.get("Config File", "")
+        self.parent.settings["Acquisition Mode"] = data.get(
+            "Acquisition Mode",
+            "FULL",
+        )
         self.parent._set_texts()
+
 
     def remove_all(self):
         """Method to remove all added devices

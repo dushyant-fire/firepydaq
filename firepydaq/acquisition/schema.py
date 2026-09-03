@@ -25,7 +25,10 @@ schema = {
                 "Name": {
                     "type": "string"
                 },
-                "Experiment Name": {
+                "Project Name": {
+                    "type": "string"
+                },
+                "Series Name": {
                     "type": "string"
                 },
                 "Test Name": {
@@ -125,7 +128,7 @@ schema = {
                             }
                         }
                     },
-                "required": ["Name", "Experiment Name", "Test Name", "Sampling Rate", "Formulae File", "Experiment Type", "Config File"]
+                "required": ["Name", "Project Name", "Series Name", "Test Name", "Sampling Rate", "Formulae File", "Experiment Type", "Config File"]
     }
 """Schema for FIREpyDAQ configuration file
 """

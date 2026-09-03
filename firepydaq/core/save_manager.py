@@ -312,12 +312,44 @@ class SaveManager:
                 )
 
             chunks = sorted(writer.chunk_dir.glob("chunk_*.parquet"))
-            if not chunks:
-                self._notify("No data chunks were written.", "warning")
-                result = SaveResult(
-                    False, None, None, writer.chunk_dir, 0, 0, writer_ok,
-                    "No data chunks were written.",
+
+            acquisition_mode = (manifest.manifest.get(
+                    "acquisition_mode",
+                    "FULL",
                 )
+                if manifest is not None
+                else "FULL"
+            )
+
+            # -----------------------------------------
+            # SERIAL ONLY FINALIZATION
+            # -----------------------------------------
+            if acquisition_mode == "SERIAL_ONLY":
+
+                if self._device_registry is not None:
+                    for device in self._device_registry.devices():
+                        device.stop_run()
+
+                if manifest is not None:
+                    manifest.finalize(None, None, 0,)
+
+                self._notify(
+                    "Save completed.",
+                    "success",
+                )
+
+                result = SaveResult(True, None, None, writer.chunk_dir, 0, 0, writer_ok,)
+                self.last_result = result
+                return result
+
+            # -----------------------------------------
+            # FULL/NI FINALIZATION
+            # -----------------------------------------
+
+            if not chunks:
+                result = SaveResult(False, None, None, writer.chunk_dir, 0, 0, writer_ok, 
+                                    "No data chunks were written.",
+                                    )
                 self.last_result = result
                 return result
 

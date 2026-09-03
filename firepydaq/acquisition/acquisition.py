@@ -38,7 +38,6 @@ from .MainMenu import MainMenu
 from .SerialConfigPersistence import serial_devices_to_settings
 from .CompactGui import install_compact_gui
 import json
-from .NotificationPanel import NotificationPanel
 from .OperationsConsole import OperationsConsole
 
 # Dashboard
@@ -70,6 +69,7 @@ from .ni_device import NIDaqDevice
 
 from .abstract_device import DeviceState
 from .device_registry import DeviceRegistry
+from firepydaq.core.acquisition_mode import AcquisitionMode
 
 # Error handling
 import traceback
@@ -118,7 +118,7 @@ class _GuiApplication(QMainWindow):
         self.popup_light = self.assets_folder + os.path.sep + "popup_light.css"
         self.popup_dark = self.assets_folder + os.path.sep + "popup_dark.css"
         try:
-            f = open(self.style_light)
+            f = open(self.style_dark)
             str = f.read()
             self.setStyleSheet(str)
             f.close()
@@ -234,7 +234,7 @@ class _GuiApplication(QMainWindow):
             or a string that matches `re_StrAllowable` pattern
         - test_btn: QPushButton
             Connects to `set_test_file`
-        - exp_input: QLineEdit
+        - proj_input: QLineEdit
             Name of the experiment
             `re_StrAllowable` pattern is checked in `set_up()`
         - test_type_input: QComboBox
@@ -288,7 +288,7 @@ class _GuiApplication(QMainWindow):
         # Experimenter's Name
         self.test_label = QLabel("Test name:")
         self.test_label.setMaximumWidth(200)
-        self.input_layout.addWidget(self.test_label, 2, 0)
+        self.input_layout.addWidget(self.test_label, 3, 0)
 
         self.test_layout = QHBoxLayout()
         self.test_input = QLineEdit()
@@ -299,35 +299,44 @@ class _GuiApplication(QMainWindow):
         self.test_btn.setMaximumWidth(50)
         self.test_layout.addWidget(self.test_input)
         self.test_layout.addWidget(self.test_btn)
-        self.input_layout.addLayout(self.test_layout, 2, 1)
+        self.input_layout.addLayout(self.test_layout, 3, 1)
 
-        # Experiment Name
+        self.series_label = QLabel("Series Name:")
+        self.series_label.setMaximumWidth(200)
+        self.input_layout.addWidget(self.series_label, 2, 0)
+
+        self.series_input = QLineEdit()
+        self.series_input.setMaximumWidth(200)
+        self.series_input.setPlaceholderText("Test series' name")
+        self.input_layout.addWidget(self.series_input, 2, 1)
+
+        # Project Name
         self.exp_label = QLabel("Project name:")
         self.exp_label.setMaximumWidth(200)
         self.input_layout.addWidget(self.exp_label, 1, 0)
 
-        self.exp_input = QLineEdit()
-        self.exp_input.setPlaceholderText("Your Project's name")
-        self.exp_input.setMaximumWidth(200)
-        self.input_layout.addWidget(self.exp_input, 1, 1)
+        self.proj_input = QLineEdit()
+        self.proj_input.setPlaceholderText("Your Project's name")
+        self.proj_input.setMaximumWidth(200)
+        self.input_layout.addWidget(self.proj_input, 1, 1)
 
-        # Test Name
+        # Test type
         self.test_type_label = QLabel("Experiment Type:")
         self.test_type_label.setMaximumWidth(200)
-        self.input_layout.addWidget(self.test_type_label, 3, 0)
+        self.input_layout.addWidget(self.test_type_label, 4, 0)
 
         self.test_type_input = QComboBox()
         self.test_type_input.addItem('Experiment')
         self.test_type_input.addItem('Calibration')
         self.test_type_input.setMaximumWidth(200)
-        self.input_layout.addWidget(self.test_type_input, 3, 1)
+        self.input_layout.addWidget(self.test_type_input, 4, 1)
 
         # Sampling Rate
         self.sample_rate_label = QLabel("Sampling Rate (Hz):")
         self.sample_rate_label.setToolTip("Will only accept floats")
         self.sample_rate_label.setToolTipDuration(500)
         self.sample_rate_label.setMaximumWidth(200)
-        self.input_layout.addWidget(self.sample_rate_label, 4, 0)
+        self.input_layout.addWidget(self.sample_rate_label, 5, 0)
 
         self.sample_rate_input = QLineEdit()
         self.sample_rate_input.setMaximumWidth(200)
@@ -335,11 +344,32 @@ class _GuiApplication(QMainWindow):
         reg_ex_1 = QRegularExpression(r"[0-9]*\.[0-9]{0,4}")  # double
         self.sample_rate_input.setValidator(QRegularExpressionValidator(reg_ex_1))  # noqa: E501
         # .setValidator(QRegExpValidator(reg_ex_1))
-        self.input_layout.addWidget(self.sample_rate_input, 4, 1)
+        self.input_layout.addWidget(self.sample_rate_input, 5, 1)
+
+        # Acquisition hardware participation mode
+        self.acquisition_mode_label = QLabel("Acquisition Mode:")
+        self.acquisition_mode_label.setMaximumWidth(200)
+        self.input_layout.addWidget(self.acquisition_mode_label, 6, 0)
+
+        self.acquisition_mode_input = QComboBox()
+        self.acquisition_mode_input.setMaximumWidth(200)
+        self.acquisition_mode_input.addItem(
+            "Full (NI + Serial Devices)",
+            AcquisitionMode.FULL,
+        )
+        self.acquisition_mode_input.addItem(
+            "Serial Only",
+            AcquisitionMode.SERIAL_ONLY,
+        )
+        self.acquisition_mode_input.setToolTip(
+            "Full mode requires validated NI hardware. Serial Only runs connected "
+            "Alicat and streaming serial devices without NI hardware."
+        )
+        self.input_layout.addWidget(self.acquisition_mode_input, 6, 1)
 
         # Configuration File Name
         self.config_label = QLabel("Select Configuration File:")
-        self.input_layout.addWidget(self.config_label, 5, 0)
+        self.input_layout.addWidget(self.config_label, 7, 0)
         self.config_label.setMaximumWidth(200)
 
         self.config_file_layout = QHBoxLayout()
@@ -351,11 +381,11 @@ class _GuiApplication(QMainWindow):
         self.config_file_edit.setPlaceholderText("Your Config file")
         self.config_file_layout.addWidget(self.config_file_edit)
         self.config_file_layout.addWidget(self.config_input)
-        self.input_layout.addLayout(self.config_file_layout, 5, 1)
+        self.input_layout.addLayout(self.config_file_layout, 7, 1)
 
         # Formulae File Name
         self.formulae_label = QLabel("Select Formulae File:")
-        self.input_layout.addWidget(self.formulae_label, 6, 0)
+        self.input_layout.addWidget(self.formulae_label, 8, 0)
         self.formulae_label.setMaximumWidth(200)
 
         self.formulae_file_layout = QHBoxLayout()
@@ -367,7 +397,7 @@ class _GuiApplication(QMainWindow):
         self.formulae_file_edit.setPlaceholderText("Your Formula file")
         self.formulae_file_layout.addWidget(self.formulae_file_edit)
         self.formulae_file_layout.addWidget(self.formulae_input)
-        self.input_layout.addLayout(self.formulae_file_layout, 6, 1)
+        self.input_layout.addLayout(self.formulae_file_layout, 8, 1)
 
         # Explicit NI hardware validation
         self.validate_ni_button = QPushButton("Validate NI Hardware")
@@ -393,9 +423,12 @@ class _GuiApplication(QMainWindow):
         self.controls_layout.addWidget(self.validate_ni_button)
         self.controls_layout.addWidget(self.acquisition_button)
         self.controls_layout.addWidget(self.save_button)
-        self.input_layout.addLayout(self.controls_layout, 7, 0, 1, 3,)
+        self.input_layout.addLayout(self.controls_layout, 9, 0, 1, 3,)
 
         self.config_file_edit.textChanged.connect(self._invalidate_ni_validation)
+        self.acquisition_mode_input.currentIndexChanged.connect(
+            self._on_acquisition_mode_changed
+        )
 
         # self.save_bool = False
 
@@ -406,6 +439,7 @@ class _GuiApplication(QMainWindow):
         self.panel.setMaximumHeight(590)
         self.notifications_layout.addWidget(self.panel)
         self.operator_events = self.panel.operator_events
+        self.operator_events.setEnabled(False)
 
         self.main_input_layout.addLayout(self.input_layout)
         self.main_input_layout.addLayout(self.notifications_layout)
@@ -547,14 +581,92 @@ class _GuiApplication(QMainWindow):
         except (TypeError, ValueError):
             return False
 
+    def _selected_acquisition_mode(self) -> AcquisitionMode:
+        widget = getattr(self, "acquisition_mode_input", None)
+        if widget is None:
+            return AcquisitionMode.FULL
+        value = widget.currentData()
+        return AcquisitionMode(value or AcquisitionMode.FULL)
+
+    def _is_serial_only(self) -> bool:
+        return self._selected_acquisition_mode() == AcquisitionMode.SERIAL_ONLY
+
+    def _on_acquisition_mode_changed(self, *_args) -> None:
+        mode = self._selected_acquisition_mode()
+        if getattr(self, "_last_mode", None) == mode:
+            return
+        self._last_mode = mode
+        engine = getattr(self, "engine", None)
+        if engine is not None:
+            try:
+                engine.set_mode(mode)
+            except RuntimeError as exc:
+                self.inform_user(str(exc))
+                index = self.acquisition_mode_input.findData(engine.mode)
+                if index >= 0:
+                    self.acquisition_mode_input.blockSignals(True)
+                    self.acquisition_mode_input.setCurrentIndex(index)
+                    self.acquisition_mode_input.blockSignals(False)
+                return
+
+        serial_only = mode == AcquisitionMode.SERIAL_ONLY
+        for widget_name in (
+            "sample_rate_label",
+            "sample_rate_input",
+            "config_label",
+            "config_file_edit",
+            "config_input",
+            "validate_ni_button",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setEnabled(not serial_only)
+
+        if serial_only:
+            self.labels_to_save = []
+            self.acquisition_button.setEnabled(True)
+            self.validate_ni_button.setText("NI Not Required")
+            self.notify("Acquisition mode: SERIAL_ONLY", "info")
+        else:
+            validated = bool(engine and engine.ni_hardware_validated)
+            self.acquisition_button.setEnabled(validated)
+            self.validate_ni_button.setText(
+                "NI Validated" if validated else "Validate NI Hardware"
+            )
+            self.notify("Acquisition mode: FULL", "info")
+
+    def _validate_serial_only_devices(self) -> None:
+        registry = getattr(self, "device_registry", None)
+        if registry is None:
+            raise RuntimeError("Device registry is unavailable.")
+        serial_devices = [
+            device
+            for device in registry.devices()
+            if device.device_type != "ni_daq"
+            and device.state in (DeviceState.CONNECTED, DeviceState.RUNNING)
+        ]
+        if not serial_devices:
+            raise RuntimeError(
+                "Serial Only mode requires at least one connected serial device. "
+                "Connect a device in Device Manager before starting acquisition."
+            )
+
     def _all_fields_filled(self):
-        if (self.name_input.text().strip() == ""
-                or self.exp_input.text().strip() == ""
-                or self.test_input.text().strip() == ""
-                or self.config_file.strip() == ""
-                or self.sample_rate_input.text().strip() == ""):
-            raise UnfilledFieldError("Unfilled fields encountered.")
+        required = (
+            self.name_input.text().strip(),
+            self.proj_input.text().strip(),
+            self.test_input.text().strip(),
+        )
+        if not all(required):
+            raise UnfilledFieldError("Operator, project, and test fields are required.")
+
+        if not self._is_serial_only():
+            if not self.config_file_edit.text().strip():
+                raise UnfilledFieldError("NI configuration file is required in Full mode.")
+            if not self.sample_rate_input.text().strip():
+                raise UnfilledFieldError("NI sampling rate is required in Full mode.")
         return True
+
 
     def validate_df(self, letter, path):
         """Method to check if the config or formulae file path
@@ -609,57 +721,66 @@ class _GuiApplication(QMainWindow):
         return False
 
     def set_up(self):
-        """Method to check NI DAQ setup
-        as defined by the user in input settings.
-
-        - First, a check involves if all fields are filled.
-        Only Formulae file is optional.
-
-        - Input fields and files selected
-        are checked as per requirements
-        indicated in `input_content()`.
-
-        - Paths to save all data and NI DAQ settings
-        are created via calling
-        the method `Create_SavePath()`.
-        """
+        """Validate current GUI settings and build the run configuration."""
         self._all_fields_filled()
+        mode = self._selected_acquisition_mode()
+        self.settings["Acquisition Mode"] = mode.value
 
-        # Allow only alphunumeric string with underscores in names
-        if re.match(self.re_strAllowable, self.name_input.text()) and re.match(self.re_strAllowable, self.exp_input.text()):  # noqa: E501
-            self.settings["Name"] = (self.name_input.text())
-            self.settings["Experiment Name"] = self.exp_input.text()
+        if (
+            re.fullmatch(self.re_strAllowable, self.name_input.text())
+            and re.fullmatch(self.re_strAllowable, self.proj_input.text())
+        ):
+            self.settings["Name"] = self.name_input.text()
+            self.settings["Project Name"] = self.proj_input.text()
+            self.settings["Series Name"] = self.series_input.text()
         else:
-            raise ValueError("Names can only be alphanumeric or contain spaces.")  # noqa: E501
-
-        try:
-            sampling_rate = float(self.sample_rate_input.text())
-        except ValueError as e:
-            raise ValueError("Invalid Sampling Rate") from e
-        self.settings["Sampling Rate"] = sampling_rate
+            raise ValueError(
+                "Operator and project names may contain only letters, numbers, "
+                "and underscores."
+            )
 
         self.settings["Experiment Type"] = self.test_type_input.currentText()
-
-        # Create save path
         self.Create_SavePath()
 
-        if self.formulae_file_edit.text().strip() == "" or self.validate_df("f", self.formulae_file_edit.text()):  # noqa: E501
-            self.settings["Formulae File"] = self.formulae_file_edit.text()
-            self.formulae_file = self.formulae_file_edit.text()
-        else:
-            self.inform_user("Formulae File does not meet requirements.")
+        formula_path = self.formulae_file_edit.text().strip()
+        if formula_path and not self.validate_df("f", formula_path):
+            raise ValueError("Formulae file does not meet requirements.")
+        self.settings["Formulae File"] = formula_path
+        self.formulae_file = formula_path
 
-        if self.validate_df("c", self.config_file_edit.text()):
-            self.settings["Config File"] = self.config_file_edit.text()
-            self.config_df = pl.read_csv(self.config_file)
-            self.config_df.columns = [i.strip() for i in self.config_df.columns]  # noqa: E501
-            self.labels_to_save = self.config_df.select("Label").to_series().to_list()  # noqa: E501
+        if mode == AcquisitionMode.SERIAL_ONLY:
+            self.settings["Sampling Rate"] = 0.0
+            self.settings["Config File"] = ""
+            self.config_file = ""
+            self.labels_to_save = []
         else:
-            self.inform_user("Config File does not meet requirements.")
-            raise ValueError("Check config file")
+            try:
+                sampling_rate = float(self.sample_rate_input.text())
+            except ValueError as exc:
+                raise ValueError("Invalid NI sampling rate.") from exc
+            if sampling_rate <= 0:
+                raise ValueError("NI sampling rate must be positive.")
 
-        if self.device_arr:
-            self.settings["Devices"] = self.dev_arr_to_dict()
+            config_path = self.config_file_edit.text().strip()
+            if not self.validate_df("c", config_path):
+                raise ValueError("NI configuration file does not meet requirements.")
+
+            self.settings["Sampling Rate"] = sampling_rate
+            self.settings["Config File"] = config_path
+            self.config_file = config_path
+            self.config_df = pl.read_csv(config_path)
+            self.config_df.columns = [column.strip() for column in self.config_df.columns]
+            self.labels_to_save = self.config_df.select("Label").to_series().to_list()
+
+        devices = self.dev_arr_to_dict() if self.device_arr else {}
+        serial_devices = serial_devices_to_settings(self)
+        if serial_devices:
+            devices["SerialDevices"] = serial_devices
+        if devices:
+            self.settings["Devices"] = devices
+        else:
+            self.settings.pop("Devices", None)
+
 
     def Create_SavePath(self):
         """Method to create paths to
@@ -692,7 +813,7 @@ class _GuiApplication(QMainWindow):
             Project name is "Project",
             the save path for NI data will be the following.
 
-            "./02_ExperimentData/YYYYProject/YYYYMMDD_HHMMSS_User_Project_Test1.parquet".
+            "./02_ExperimentData/YYYYProject/YYYYMMDD_HHMMSS_User_Project_Series_Test1.parquet".
 
             `02_ExperimentData` directory will be created
             in the current working directory.
@@ -755,14 +876,17 @@ class _GuiApplication(QMainWindow):
                 if not os.path.exists(self.save_dir):
                     os.mkdir(self.save_dir)
                 project_dirname = (now.strftime("%Y") +
-                                   self.settings["Experiment Name"] +
+                                   self.settings["Project Name"] +
+                                   os.sep +
+                                   self.settings["Series Name"] +
                                    os.sep)
                 self.save_dir = self.save_dir + project_dirname
                 if not os.path.exists(self.save_dir):
                     os.mkdir(self.save_dir)
                 self.save_dir = (self.save_dir + now.strftime("%Y%m%d_%H%M%S")
                                  + "_" + self.settings["Name"] + "_" +
-                                 self.settings["Experiment Name"] + "_")
+                                 self.settings["Project Name"] + "_" +
+                                 self.settings["Series Name"] + "_")
                 test_name = fname
             else:
                 raise ValueError("""Check test name. It should be either a\
@@ -780,52 +904,37 @@ class _GuiApplication(QMainWindow):
         self.test_input.setText(test_name)
 
     def settings_to_json(self):
-        """Method to save all NI input fields
-        and devices added by the user is saved in a
-        .json file in a location of user's choice.
-
-        These settings can be loaded later.
-        """
-        self._all_fields_filled()
-        self.settings["Experiment Type"] = self.test_type_input.currentText()
-        try:
-            sampling_rate = int(self.sample_rate_input.text())
-        except ValueError as e:
-            raise ValueError("Invalid Sampling Rate") from e
-        self.settings["Sampling Rate"] = sampling_rate
-        if (all(c.isalnum() or c == "_" for c in self.name_input.text()) and
-                all(c.isalnum() or c == "_" for c in self.exp_input.text())):
-            self.settings["Name"] = (self.name_input.text())
-            self.settings["Experiment Name"] = self.exp_input.text()
+        """Serialize GUI and device settings, including acquisition mode."""
+        self.set_up()
         self.settings["Test Name"] = self.test_input.text()
-        self.settings["Formulae File"] = self.formulae_file_edit.text()
-        self.settings["Config File"] = self.config_file_edit.text()
-        devices = self.dev_arr_to_dict() if self.device_arr else {}
-        serial_devices = serial_devices_to_settings(self)
-        if serial_devices:
-            devices["SerialDevices"] = serial_devices
-        if devices:
-            self.settings["Devices"] = devices
-        else:
-            self.settings.pop("Devices", None)
-        json_string = json.dumps(self.settings, indent=4)
-        return json_string
+        return json.dumps(self.settings, indent=4)
 
     def _set_texts(self):
-        # Is called when main menu .json file is loaded.
-        # Called in repopulate_settings.
-        self.exp_input.setText(self.settings["Experiment Name"])
-        self.name_input.setText(self.settings["Name"])
-        self.test_input.setText(self.settings["Test Name"])
-        self.save_dir = os.path.dirname(self.settings["Test Name"])
-        self.common_path = self.settings["Test Name"].split(".parquet")[0]
-        self.sample_rate_input.setText(str(self.settings["Sampling Rate"]))
-        self.formulae_file = self.settings["Formulae File"]
-        self.formulae_file_edit.setText(self.settings["Formulae File"])
-        self.test_type_input.setCurrentText(self.settings["Experiment Type"])
-        self.config_file = self.settings["Config File"]
-        self.config_file_edit.setText(self.settings["Config File"])
-        firepydaq_logger.info(__name__ + ": Config texts updated.")
+        """Populate input controls from loaded settings."""
+        self.proj_input.setText(self.settings.get("Project Name", ""))
+        self.name_input.setText(self.settings.get("Name", ""))
+        self.series_input.setText(self.settings.get("Series Name", "",))
+        self.test_input.setText(self.settings.get("Test Name", ""))
+        self.save_dir = os.path.dirname(self.settings.get("Test Name", ""))
+        self.common_path = self.settings.get("Test Name", "").split(".parquet")[0]
+        self.sample_rate_input.setText(str(self.settings.get("Sampling Rate", "")))
+        self.formulae_file = self.settings.get("Formulae File", "")
+        self.formulae_file_edit.setText(self.formulae_file)
+        self.test_type_input.setCurrentText(
+            self.settings.get("Experiment Type", "Experiment")
+        )
+        self.config_file = self.settings.get("Config File", "")
+        self.config_file_edit.setText(self.config_file)
+
+        mode_value = self.settings.get("Acquisition Mode", AcquisitionMode.FULL.value)
+        try:
+            mode = AcquisitionMode(mode_value)
+        except ValueError:
+            mode = AcquisitionMode.FULL
+        index = self.acquisition_mode_input.findData(mode)
+        if index >= 0:
+            self.acquisition_mode_input.setCurrentIndex(index)
+        firepydaq_logger.info("%s: Configuration controls updated.", __name__)
 
     def inform_user(self, err_txt):
         """Method to inform important
@@ -845,87 +954,65 @@ class _GuiApplication(QMainWindow):
         self.msg.exec()
 
     def validate_fields(self):
-        """Method to validate if the config
-        and the formulae file path would be used
-        without errors during post processing.
-
-        This is done by creating a random data DataFrame.
-        The DataFrame columns correspond to the `Label` column
-        in the config file.
-        The values corresponding to each `Label` is
-        populated with a random integer between 0 and 10.
-
-        The random data DataFrame, config file path, and formulae path
-        are supplied to PostProcessData for checking if
-        the random DataFrame (simulating collected data)
-        can be scaled and post processed without any errors.
-        """
+        """Validate experiment settings and NI processing inputs when applicable."""
         self.set_up()
+        if self._is_serial_only():
+            self._validate_serial_only_devices()
+            return
+
         if self.display and self.tab and hasattr(self, "data_vis_tab"):
             self.data_vis_tab.set_labels(self.config_file)
+
         config_df = pl.read_csv(self.settings["Config File"])
-        random_input = np.array([np.random.randint(0, 10)*i for i in np.ones(config_df.select("Label").shape)])  # noqa: E501
-        random_dict = {i: random_input[n] for n, i in enumerate(self.labels_to_save)}  # noqa: E501
+        random_input = np.array(
+            [np.random.randint(0, 10) * item for item in np.ones(config_df.select("Label").shape)]
+        )
+        random_dict = {
+            label: random_input[index]
+            for index, label in enumerate(self.labels_to_save)
+        }
         random_df = pl.DataFrame(data=random_dict)
-        CheckPP = PostProcessData(datapath=random_df, configpath=self.settings['Config File'], formulaepath=self.settings['Formulae File'])  # noqa: E501
-        CheckPP.ScaleData()
-        CheckPP.UpdateData(dump_output=False)
+        checker = PostProcessData(
+            datapath=random_df,
+            configpath=self.settings["Config File"],
+            formulaepath=self.settings["Formulae File"],
+        )
+        checker.ScaleData()
+        checker.UpdateData(dump_output=False)
 
     def initiate_dataArrays(self):
-        """A method to initiate empty numpy data array for
-        storing NI data during acquisition.
-
-        If the number of Analog Inputs (AI)
-        in the config file is 1,
-        an empty `ydata` numpy array of shape (1,) is created.
-
-        If the number of AIs are greater than one (example 4),
-        an empty `ydata` numpy array of shape (4,) is created
-
-        If there are both AIs and Analog Outputs (AO)
-        in the config file, empty `ydata` array with
-        shape equal to total AI (say 3) and AOs (say 1),
-        (4,) is created.
-
-        An empty `xdata` array of shape (1,)
-        for storing relative times
-        is created with a single element `0`.
-
-        An empty 1D numpy array of name `abs_timestamp`
-        is created to store corresponding
-        absolute times during acquisition.
-        """
-        if self.NIDAQ_Device.ai_counter > 0:
-            if len(self.NIDAQ_Device.ailabel_map) == 1:
+        """Initialize NI visualization buffers; serial-only runs need empty buffers."""
+        ni_device = getattr(self, "NIDAQ_Device", None)
+        if ni_device is None:
+            self.ydata = np.empty(0)
+        elif ni_device.ai_counter > 0:
+            if len(ni_device.ailabel_map) == 1:
                 self.ydata = np.empty(0)
             else:
-                self.ydata = np.empty((len(self.NIDAQ_Device.ailabel_map), 0))
-        else:  # Todo: check for bugs with AO module
-            self.ydata = np.empty((len(self.settings["Label"]), 0))
-        if self.mfcs != {}:
-            self.all_mfcData = {}
-            for mfcname in self.mfcs:
-                self.all_mfcData[mfcname] = pl.DataFrame()
+                self.ydata = np.empty((len(ni_device.ailabel_map), 0))
+        else:
+            self.ydata = np.empty((len(self.labels_to_save), 0))
+
         self.xdata = np.array([0])
         self.abs_timestamp = np.array([])
         self.timing_np = np.empty((0, 3))
 
     def _invalidate_ni_validation(self, *_args) -> None:
+        if self._is_serial_only():
+            return
         engine = getattr(self, "engine", None)
         if engine is not None:
             engine.invalidate_ni_validation()
-        button = getattr(self, "validate_ni_button", None)
-        if button is not None:
-            button.setText("Validate NI Hardware")
-        acquisition_button = getattr(self, "acquisition_button", None)
-        if acquisition_button is not None and not acquisition_button.isChecked():
-            acquisition_button.setEnabled(False)
         self.validate_ni_button.setEnabled(True)
         self.validate_ni_button.setText("Validate NI Hardware")
-        self.acquisition_button.setEnabled(False)
+        if not self.acquisition_button.isChecked():
+            self.acquisition_button.setEnabled(False)
 
     def validate_ni_hardware(self) -> None:
         """Validate GUI fields and create a connected NI runtime."""
+        if self._is_serial_only():
+            self.inform_user("NI validation is not used in Serial Only mode.")
+            return
         try:
             self.validate_fields()
             self.NIDAQ_Device = self.engine.validate_ni_hardware(
@@ -943,106 +1030,85 @@ class _GuiApplication(QMainWindow):
 
         self.validate_ni_button.setText("NI Validated")
         self.validate_ni_button.setEnabled(False)
-
         self.acquisition_button.setEnabled(True)
 
     def acquisition_begins(self):
-        """Method to begin acquisition for all devices.
-
-        The following methods are called in order.
-        1. `validate_fields()`.
-        2. `CreateDAQTask()` in `api` module to create
-        AI and AO continuous tasks. (See `api` module for details)
-        3. `initiate_dataArrays()`
-
-        Once these run without any issues, the `save_button`
-        is enabled, `ContinueAcquisition` boolean is set to True,
-
-        """
-        if self.acquisition_button.isChecked():
-            if not self.engine.ni_hardware_validated:
-                self.acquisition_button.setChecked(False)
-                self.inform_user("Validate NI hardware before starting acquisition.")
-                return
+        """Start or stop acquisition using the explicitly selected hardware mode."""
+        if not self.acquisition_button.isChecked():
+            if hasattr(self, "raw_publisher"):
+                try:
+                    self.raw_publisher.socket.close()
+                except Exception:
+                    pass
+                del self.raw_publisher
+            self.engine.stop_acquisition()
+            if self.engine.publisher is not None:
+                self.engine.publisher.stop()
             self.run_counter = 0
+            self.save_button.setEnabled(False)
+            return
 
-            try:
+        self.run_counter = 0
+        self._mode = self._selected_acquisition_mode()
+        try:
+            self.set_up()
+            if self._mode == AcquisitionMode.SERIAL_ONLY:
+                self._validate_serial_only_devices()
+                self.NIDAQ_Device = None
+                self.engine.start_acquisition()
+            else:
+                if not self.engine.ni_hardware_validated:
+                    raise RuntimeError("Validate NI hardware before starting acquisition.")
                 self.NIDAQ_Device = self.engine.start_ni_acquisition(
                     parent=self,
                     name="NI Task",
                     config_path=self.settings["Config File"],
                     sampling_rate_hz=float(self.settings["Sampling Rate"]),
                 )
-            except Exception:
-                # todo: Parse NI errors properly.. sampling rate? device name? config file error? # noqa: E501
-                self.acquisition_button.nextCheckState()
-                type, value, tb = sys.exc_info()
-                print(type, value, traceback.print_tb(tb))
-                self.inform_user("Terminating acquisition due to DAQ Connection Errors\n " + str(type) + str(value))  # noqa: E501
-                return
+                self.initiate_dataArrays()
+        except Exception as exc:
+            self.acquisition_button.setChecked(False)
+            self.inform_user(f"Acquisition could not start:\n{exc}")
+            self.notify(f"Acquisition startup failed: {exc}", "error")
+            return
 
-            if self.mfcs != {}:
-                registry = getattr(self, "device_registry", None,)
+        self.acquisition_start_monotonic = time.monotonic()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.settings["Run ID"] = (
+            f"{timestamp}_"
+            f"{self.name_input.text()}_"
+            f"{self.proj_input.text()}_"
+            f"{self.series_input.text()}_"
+            f"{self.test_input.text()}"
+        )
+        self.engine.publish_metadata(
+                        settings=self.settings,
+                        ni_labels=self.labels_to_save if self._mode == AcquisitionMode.FULL else (),
+                        force=True,
+                    )
+        if hasattr(self, "operator_events"):
+            try:
+                self.operator_events.configure_for_current_test()
+            except Exception as exc:
+                self.notify(
+                    f"Operator event file was not initialized: {exc}",
+                    "warning",
+                )
 
-                if registry is not None:
-                    disconnected = []
-                    for mfcname in self.mfcs:
-                        runtime = registry.get(mfcname)
-                        if runtime is None:
-                            disconnected.append(mfcname)
-                            continue
-                        if runtime.state == DeviceState.DISCONNECTED:
-                            disconnected.append(mfcname)
+        self.save_button.setEnabled(True)
+        self.acquisition_button.setText("Stop Acquisition")
 
-                    if disconnected:
-                        try:
-                            raise ConnectionError("Disconnected MFC devices: "+ ", ".join(disconnected))
-                        except Exception as e:
-                            self.acquisition_button.nextCheckState()
-                            self.inform_user(str(e))
-                            return
-
-            self.initiate_dataArrays()
-            self.acquisition_start_monotonic = time.monotonic()
-            if hasattr(self, "operator_events"):
-                try:
-                    self.operator_events.configure_for_current_test()
-                except Exception as exc:
-                    self.notify(f"Operator event file was not initialized: {exc}", "warning",)
-
-            self.save_button.setEnabled(True)
-            self.acquisition_button.setText("Stop Acquisition")
-
-            # Start publishing
+        if self.engine.publisher is not None:
             self.engine.publisher.start()
             self.engine.publish_metadata(
-                            settings=self.settings,
-                            ni_labels=self.labels_to_save,
-                            force=True,
-                        )
-            # Create publisher only once
-            if not hasattr(self, "raw_publisher"):
-                self.raw_publisher = RawDataPublisher()
-            self.runpyDAQ()
-        else:
-            # self.ContinueAcquisition = False
-            if hasattr(self, "raw_publisher"):
-                try:
-                    self.raw_publisher.socket.close()
-                    del self.raw_publisher
-                except Exception:
-                    pass
+                settings=self.settings,
+                ni_labels=self.labels_to_save if self._mode == AcquisitionMode.FULL else (),
+                force=True,
+            )
 
-            time.sleep(1)
-            # self.save_bool = False
-            self.engine.stop_acquisition()
-            if self.engine.publisher is not None:
-                self.engine.publisher.stop()
-            self.run_counter = 0
-            self.save_button.setEnabled(False)
-            # self.acquisition_button.setText("Start Acquisition")
-
-
+        if not hasattr(self, "raw_publisher"):
+            self.raw_publisher = RawDataPublisher()
+        self.runpyDAQ()
 
     @error_logger("SaveData")
             # self.save_bool = False
@@ -1157,6 +1223,7 @@ class application(_GuiApplication):
         self.queue_warning_75_sent = False
         self.queue_warning_90_sent = False
         self._latest_ni_values = None
+        self._mode = AcquisitionMode.FULL
 
         # Unified non-blocking device registry. NI remains on its hardware-
         # timed path during this migration; Alicat and streaming serial devices
@@ -1186,6 +1253,7 @@ class application(_GuiApplication):
             save_manager=self.save_manager,
             health_manager=self.device_health,
             ni_device_factory=NIDaqDevice,
+                   mode=AcquisitionMode.FULL,
         )
 
         self.engine.configure_cycle_scheduler(
@@ -1279,37 +1347,36 @@ class application(_GuiApplication):
         self.notify("Launching Dashboard on http://127.0.0.1:1222", "info")
 
     def runpyDAQ(self):
-        self._ensure_serial_workers()
         self.engine.capture_serial_snapshots()
-        # self.engine.collect_snapshots()
         self.engine.update_health()
-        cycle = self.engine.read_ni_cycle(
-            self.NIDAQ_Device,
-            labels=self.labels_to_save,
-            datetime_format=self.dt_format,
-        )
 
-        if cycle is not None:
-            self._latest_ni_values = cycle.values
+        cycle = None
+        ni_device = getattr(self, "NIDAQ_Device", None)
+        if self.engine.mode == AcquisitionMode.FULL and ni_device is not None:
+            cycle = self.engine.read_ni_cycle(
+                ni_device,
+                labels=self.labels_to_save,
+                datetime_format=self.dt_format,
+            )
+            if cycle is not None:
+                self._latest_ni_values = cycle.values
 
         if self.engine.publisher is not None:
             snapshots = self.engine.collect_snapshots()
-
-            values = (
-                self.engine.publisher.payload_builder.live_values(
-                    ni_labels=self.labels_to_save,
-                    ni_values=self._latest_ni_values,
-                    snapshots=snapshots,
-                )
+            ni_labels = self.labels_to_save if self.engine.mode == AcquisitionMode.FULL else ()
+            ni_values = self._latest_ni_values if self.engine.mode == AcquisitionMode.FULL else None
+            values = self.engine.publisher.payload_builder.live_values(
+                ni_labels=ni_labels,
+                ni_values=ni_values,
+                snapshots=snapshots,
             )
-
             self.engine.publisher.publish_live(values)
-            health = (self.engine.publisher.payload_builder.health(snapshots))
-            self.engine.publisher.publish_health(health)
+            self.engine.publisher.publish_health(
+                self.engine.publisher.payload_builder.health(snapshots)
+            )
 
         if cycle is not None:
             try:
-                self.ActualSamplingRate = float(self.NIDAQ_Device.aitask.timing.samp_clk_rate)
                 self.xdata_new = cycle.acquisition_time
                 self.ydata_new = cycle.values
                 self.abs_timestamp = list(cycle.absolute_time)
@@ -1317,16 +1384,10 @@ class application(_GuiApplication):
                 fill = self.save_manager.queue_fill_ratio
                 if self.engine.saving:
                     if fill > 0.90 and not self.queue_warning_90_sent:
-                        self.notify(
-                            f"Writer queue at {fill:.0%} capacity",
-                            "warning",
-                        )
+                        self.notify(f"Writer queue at {fill:.0%} capacity", "warning")
                         self.queue_warning_90_sent = True
                     elif fill > 0.75 and not self.queue_warning_75_sent:
-                        self.notify(
-                            f"Writer queue at {fill:.0%} capacity",
-                            "warning",
-                        )
+                        self.notify(f"Writer queue at {fill:.0%} capacity", "warning")
                         self.queue_warning_75_sent = True
                     elif fill < 0.50:
                         self.queue_warning_75_sent = False
@@ -1338,11 +1399,6 @@ class application(_GuiApplication):
                 if hasattr(self, "data_vis_tab"):
                     if not hasattr(self.data_vis_tab, "dev_edit"):
                         self.data_vis_tab.set_labels(self.config_file)
-
-                    # The visualization worker releases vis_lock after consuming
-                    # the arrays. Use a plain Lock because that release can occur
-                    # from the worker thread. An RLock is thread-owned and raises
-                    # "cannot release un-acquired lock" in that situation.
                     plot_slot_acquired = self.vis_lock.acquire(blocking=False)
                     if plot_slot_acquired:
                         try:
@@ -1356,72 +1412,53 @@ class application(_GuiApplication):
                                 n = min(len(self.xdata), len(selected_y))
                                 x_plot = np.array(self.xdata[-n:], copy=True)
                                 y_plot = np.array(selected_y[-n:], copy=True)
-
                             if n > 0:
                                 self.data_vis_tab.set_data_and_plot(x_plot, y_plot)
                             else:
                                 self.vis_lock.release()
                         except Exception:
-                            # set_data_and_plot did not accept the update, so its
-                            # worker cannot release the lock. Release it here.
                             if self.vis_lock.locked():
                                 self.vis_lock.release()
                             raise
 
-                block_duration = max(cycle.block_duration_s, 1e-6)
                 if cycle.processing_overrun:
                     self.notify(
-                        "Data-loss warning: acquisition processing exceeded one hardware block duration.",
+                        "Data-loss warning: acquisition processing exceeded one "
+                        "hardware block duration.",
                         "warning",
                     )
-
-                if (
-                        self.device_health is not None
-                        and time.monotonic() -
-                        self.last_device_health_write
-                        > 5.0
-                        ):
-                    self.device_health.update_stale_states()
-                    self.engine.update_health()
-                    self.last_device_health_write = (time.monotonic())
-
-                last_time = float(self.xdata_new[-1])
-                if int(last_time // 5) != int((last_time - block_duration) // 5):
-                    total = self.NIDAQ_Device.aitask.in_stream.total_samp_per_chan_acquired
-                    self.notify(
-                        f"Last time entry: {last_time:.2f}, "
-                        f"Total samples/chan: {total}, "
-                        f"Actual Hz: {self.ActualSamplingRate:.2f}"
-                    )
-            except Exception:
+            except Exception as exc:
                 if self.device_health is not None:
                     try:
                         self.device_health.error("NI")
                     except Exception:
                         pass
-                exc_type, exc_value, exc_traceback = sys.exc_info()
-                self.inform_user(f"{exc_type}{exc_value}")
-                traceback.print_tb(exc_traceback)
+                self.notify(f"NI cycle handling failed: {exc}", "error")
+                traceback.print_exc()
+
+        if (
+            self.device_health is not None
+            and time.monotonic() - self.last_device_health_write > 5.0
+        ):
+            self.device_health.update_stale_states()
+            self.engine.update_health(force=True)
+            self.last_device_health_write = time.monotonic()
 
         if self.running and self.engine.schedule_next_cycle():
             return
-        else:
-            self.run_counter = 0
-            if self.save_manager.active:
-                self._finalize_safe_writer()
-            self._stop_serial_workers()
-            self.acquisition_button.setText("Start Acquisition")
-            self.save_button.setEnabled(False)
-            self.elapsed_time_offset = 0
-            self._latest_ni_values = None
-            self._stop_dashboard()
+
+        self.run_counter = 0
+        self.acquisition_button.setText("Start Acquisition")
+        self.save_button.setEnabled(False)
+        self.elapsed_time_offset = 0
+        self._latest_ni_values = None
+        self._stop_dashboard()
+
 
     @error_logger("SaveData")
     def save_data(self):
         if self.save_button.isChecked():
             self.save_button.setText("Stop")
-            for device in self.device_registry.devices():
-                device.start_run()
             self.run_counter = 0
             self.set_up()
 
@@ -1429,7 +1466,6 @@ class application(_GuiApplication):
                 self.json_file = self.save_dir + self.json_file
             if not self.is_valid_path(self.common_path):
                 self.common_path = self.save_dir + self.common_path
-
 
             json_path = Path(self.json_file)
             json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1476,9 +1512,9 @@ class application(_GuiApplication):
                 engine.set_health_manager(self.device_health)
             self.last_device_health_write = 0.0
 
-            # registering device health
-            # NI DAQ
-            self.device_health.register("NI", "DAQ")
+            # Register only devices participating in this run.
+            if self.engine.mode == AcquisitionMode.FULL:
+                self.device_health.register("NI", "DAQ")
 
             # Alicats
             if hasattr(self, "mfcs"):
@@ -1498,11 +1534,18 @@ class application(_GuiApplication):
 
             self.manifest.write()
 
-            # self._start_safe_writer()
+            self.settings["Run ID"] = Path(self.common_path).name
             self.engine.start_save(
                 self.common_path,
                 manifest=getattr(self, "manifest", None),
             )
+            if hasattr(self, "operator_events"):
+                self.operator_events.setEnabled(True)
+            self.engine.publish_metadata(
+                            settings=self.settings,
+                            ni_labels=self.labels_to_save if self._mode == AcquisitionMode.FULL else (),
+                            force=True,
+                        )
             self.save_time_offset = self.elapsed_time_offset
             self.save_begin_time = time.time()
             if hasattr(self, "operator_events"):
@@ -1515,11 +1558,16 @@ class application(_GuiApplication):
                     self.notify(f"Operator event initialization failed: {exc}", "warning",)
             firepydaq_logger.info("Safe saving initiated")
 
-            if hasattr(self, "NIDAQ_Device"):
+            if (
+                self.engine.mode == AcquisitionMode.FULL
+                and getattr(self, "NIDAQ_Device", None) is not None
+            ):
                 configured_devices.insert(0, "NI")
 
             self.notify("Devices: " + ", ".join(configured_devices), "info")
-            self.notify(f"Save file: {self.settings['Test Name']}", "info")
+            save_file = Path(self.settings['Test Name'])
+            rel_path = str(save_file.with_suffix(""))
+            self.notify(f"Save file: {rel_path}", "info")
 
             if self.dashboard:
                 self.settings["Data File"] = self.common_path + ".parquet"
@@ -1529,6 +1577,8 @@ class application(_GuiApplication):
             self.panel.operator_events.path_label.clear()
             self.panel.recent_events.clear()
             self.engine.stop_save()
+            if hasattr(self, "operator_events"):
+                self.operator_events.setEnabled(False)
 
             # self._finalize_safe_writer()
             self._stop_dashboard()
@@ -1574,11 +1624,8 @@ class application(_GuiApplication):
             if self.device_registry.get(runtime.name) is None:
                 self.device_registry.register(runtime)
 
-        # Start only devices already connected by the Device Manager. A
-        # disconnected Alicat is not polled and cannot create stale CSV rows.
-        for device in self.device_registry.devices():
-            if device.state in (DeviceState.CONNECTED, DeviceState.RUNNING):
-                device.start()
+        # The Device Manager owns connect/disconnect. AcquisitionEngine owns
+        # start/stop for all registered participating devices.
         self._serial_workers_started = True
 
     def _stop_serial_workers(self):

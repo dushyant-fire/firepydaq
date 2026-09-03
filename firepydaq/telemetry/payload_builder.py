@@ -17,17 +17,18 @@ class PayloadBuilder:
         ni_units: Mapping[str, str] | None = None,
         snapshots: Mapping[str, Any],
     ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
-        test_name = settings.get("Test Name")
         experiment = {
-            "name": settings.get("Experiment Name"),
-            "run_id": Path(str(test_name)).stem if test_name else None,
-            "operator": settings.get("Name"),
-            "sample_rate_hz": settings.get("Sampling Rate"),
+            "run_id": settings.get("Run ID", ""),
+            "project_name": settings.get("Project Name", "",),
+            "series_name": settings.get("Series Name", "",),
+            "test_name": Path(settings.get("Test Name", "",)).stem,
+            "operator": settings.get("Name", "",),
+            "acquisition_mode": settings.get("Acquisition Mode", "FULL",),
+            "sample_rate_hz": settings.get("Sampling Rate", 0.0,),
         }
         experiment = {
             key: value for key, value in experiment.items() if value is not None
         }
-
         channels: dict[str, dict[str, Any]] = {}
         units = ni_units or {}
 

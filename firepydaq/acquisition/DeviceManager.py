@@ -116,10 +116,12 @@ class StreamingSerialRuntime(AbstractDevice):
         self.serial_port = None
         self.connected = False
         self._set_state(DeviceState.DISCONNECTED)
-        self.notify(
-            f"{self.config.name} disconnected",
-            "warning",
-        )
+        was_connected = self.connected
+        if was_connected:
+            self.notify(
+                f"{self.config.name} disconnected",
+                "warning",
+            )
 
     def start(self) -> None:
         snapshot = self.snapshot()

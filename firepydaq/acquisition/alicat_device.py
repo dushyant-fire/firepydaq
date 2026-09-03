@@ -34,13 +34,6 @@ class AlicatDevice(AbstractDevice):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._controller: Optional[EchoController] = None
 
-        print(
-            "NEW ALICAT DEVICE:",
-            name,
-            "poll_interval_s =",
-            poll_interval_s,
-        )
-
     @property
     def connected(self) -> bool:
         return self.state in (DeviceState.CONNECTED, DeviceState.RUNNING)
@@ -155,17 +148,11 @@ class AlicatDevice(AbstractDevice):
             try:
                 with self._io_lock:
                     loop, controller = self._require_transport_locked()
-                    print(
-                        "ALICAT POLL:",
-                        self.name,
-                        time.time(),
-                    )
                     values = loop.run_until_complete(controller.get_MFC_val())
                 self._publish(dict(values))
             except Exception as exc:
                 if self._stop_event.is_set():
                     return
-                # self._set_error(exc)
                 print(
                     "ALICAT EXCEPTION:",
                     repr(exc)
@@ -173,10 +160,6 @@ class AlicatDevice(AbstractDevice):
                 self._notify(f"{self.name} read error: {exc}", "warning")
                 continue
 
-            print(
-                "ALICAT INTERVAL:",
-                self.poll_interval_s
-            )
             next_read = max(
                 next_read + self.poll_interval_s,
                 time.monotonic(),

@@ -168,14 +168,38 @@ class MqttPublisher(Publisher):
         force: bool = False,
     ) -> bool:
         """Publish retained metadata when first seen or when it changes."""
+        project_name = experiment.get("project_name", "",)
+        series_name = experiment.get("series_name", "",)
+        test_name = Path(experiment.get("test_name", "")).stem
+
+        run_id = experiment.get("run_id", test_name,)
         payload = {
-            "schema": "firepydaq.metadata.v1",
+            "schema": "firepydaq.metadata.v3",
             "timestamp": time.time(),
-            "experiment": dict(experiment),
-            "channels": {name: dict(info) for name, info in channels.items()},
+
+            "project_name": project_name,
+            "test_series": series_name,
+            "test_name": test_name,
+            "run_id": run_id,
+            "operator": experiment.get("operator", ""),
+            "acquisition_mode": experiment.get("acquisition_mode", "FULL"),
+
+            "channels": {
+                name: dict(info)
+                for name, info in channels.items()
+            },
         }
+
         fingerprint = self._fingerprint(
-            {"experiment": payload["experiment"], "channels": payload["channels"]}
+            {
+                "run_id": payload["run_id"],
+                "project_name": payload["project_name"],
+                "test_series": payload["test_series"],
+                "test_name": payload["test_name"],
+                "operator": payload["operator"],
+                "acquisition_mode": payload["acquisition_mode"],
+                "channels": payload["channels"],
+            }
         )
         if not force and fingerprint == self._metadata_fingerprint:
             return False
