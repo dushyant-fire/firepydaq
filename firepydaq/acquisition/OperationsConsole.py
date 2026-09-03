@@ -158,25 +158,16 @@ class OperationsConsole(QWidget):
         event_section = SectionFrame("OPERATOR EVENTS")
         self.recent_events = QListWidget()
         self.recent_events.setMinimumHeight(55)
-        self.recent_events.setMaximumHeight(180)
-        self.recent_events.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarAlwaysOff
-        )
+        self.recent_events.setMaximumHeight(150)
+        self.recent_events.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         self.operator_events = OperatorEventsWidget(
             operator_getter=lambda: app.name_input.text().strip(),
-            output_prefix_getter=lambda: getattr(
-                app,
-                "common_path",
-                None,
-            ),
-            elapsed_origin_getter=lambda: getattr(
-                app,
-                "acquisition_start_monotonic",
-                None,
-            ),
+            output_prefix_getter=lambda: getattr(app, "common_path", None,),
+            elapsed_origin_getter=lambda: getattr(app, "acquisition_start_monotonic", None,),
             notify=app.notify,
             parent=self,
+            publish_event=self.publish_operator_event,
         )
         self.operator_events.event_saved.connect(self._on_event_saved)
         self.operator_events.event_file_changed.connect(
@@ -318,3 +309,19 @@ class OperationsConsole(QWidget):
 
     def setAlignment(self, *_args, **_kwargs) -> None:
         pass
+
+    def publish_operator_event(self, row,):
+        publisher = getattr(self.app.engine, "publisher", None,)
+
+        if publisher is not None:
+            publisher.publish_event(
+                text=row["Message"],
+                event_type="operator",
+                details={
+                    "event_number": row["EventNumber"],
+                    "category": row["Category"],
+                    "operator": row["Operator"],
+                    "elapsed_time": row["ElapsedTime"],
+                    "timestamp": row["LocalTime"],
+                },
+            )

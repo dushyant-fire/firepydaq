@@ -217,6 +217,7 @@ class OperatorEventsWidget(QWidget):
         elapsed_origin_getter,
         notify,
         parent=None,
+        publish_event=None,
     ) -> None:
         super().__init__(parent)
         self.operator_getter = operator_getter
@@ -226,13 +227,12 @@ class OperatorEventsWidget(QWidget):
         self.logger = OperatorEventLogger()
         self._drafts: list[EventDraftRow] = []
         self._next_draft_id = 1
+        self.publish_event = publish_event
 
         title = QLabel("Operator Events")
         title.setStyleSheet("font-weight: 600;")
 
-        self.path_label = QLabel(
-            "Start acquisition to initialize the event file."
-        )
+        self.path_label = QLabel("Start acquisition to initialize the event file.")
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.path_label.setWordWrap(False)
 
@@ -255,12 +255,12 @@ class OperatorEventsWidget(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self.draft_container)
         scroll.setMinimumHeight(64)
-        scroll.setMaximumHeight(124)
+        scroll.setMaximumHeight(180)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 2, 0, 0)
-        layout.setSpacing(3)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(2)
         layout.addLayout(header_layout)
         layout.addWidget(self.path_label)
         layout.addWidget(scroll)
@@ -304,6 +304,7 @@ class OperatorEventsWidget(QWidget):
         draft.saved.connect(self._save_draft)
         draft.removed.connect(self._remove_draft)
         self._drafts.append(draft)
+        
         self.draft_layout.insertWidget(
             self.draft_layout.count() - 1,
             draft,
@@ -337,6 +338,7 @@ class OperatorEventsWidget(QWidget):
             self._drafts.remove(draft)
         draft.deleteLater()
 
+        self.publish_event(row)
         self.event_saved.emit(row)
         self.notify(
             f"Operator event {row['EventNumber']} saved: {row['Message']}",

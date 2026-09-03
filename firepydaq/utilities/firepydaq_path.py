@@ -43,3 +43,20 @@ def get_active_run_dir(common_path) -> Path:
         / "active_runs"
         / run_name
     )
+
+
+def get_telemetry_dir() -> Path:
+
+    firepydaq_dir = get_firepydaq_dir()
+
+    telemetry_dir = (
+        firepydaq_dir
+        / "telemetry"
+    )
+
+    telemetry_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    return telemetry_dir

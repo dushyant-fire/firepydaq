@@ -710,7 +710,7 @@ class DevicesWorkspace(QWidget):
                     console,
                 )
 
-        saving = bool(getattr(self.app, "save_bool", False))
+        saving = (hasattr(self.app, "engine") and self.app.engine.saving)
         prefix = getattr(self.app, "common_path", None)
         save_begin = getattr(self.app, "save_begin_time", time.time())
         elapsed_origin = time.monotonic() - max(0.0, time.time() - save_begin)

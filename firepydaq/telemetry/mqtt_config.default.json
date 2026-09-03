@@ -1,0 +1,17 @@
+{
+  "host": "127.0.0.1",
+  "port": 1883,
+  "topic_root": "firepydaq/lab1",
+  "client_id": "firepydaq-acquisition",
+  "username": null,
+  "password": null,
+  "keepalive_s": 30,
+  "live_interval_s": 1.0,
+  "health_interval_s": 5.0,
+  "qos_metadata": 1,
+  "qos_live": 0,
+  "qos_health": 1,
+  "qos_events": 1,
+  "tls_enabled": false,
+  "tls_ca_file": null
+}

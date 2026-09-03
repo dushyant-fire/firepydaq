@@ -134,7 +134,8 @@ class ChunkManifestManager:
         self.manifest = {
             "status": "RECORDING",
             "started_local": _local_now_iso(),
-            "experiment_name": settings.get("Experiment Name"),
+            "project_name": settings.get("Project Name"),
+            "series_name": settings.get("Series Name"),
             "test_name": settings.get("Test Name"),
             "sampling_rate_hz": settings.get("Sampling Rate"),
             "channels": list(labels),
@@ -143,6 +144,11 @@ class ChunkManifestManager:
             "final_parquet": None,
             "final_csv": None,
             "finished_local": None,
+            "acquisition_mode":
+                settings.get(
+                    "Acquisition Mode",
+                    "FULL",
+                ),
         }
 
     def update_chunk(self, rows) -> None:

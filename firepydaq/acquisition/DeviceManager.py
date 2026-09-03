@@ -116,10 +116,12 @@ class StreamingSerialRuntime(AbstractDevice):
         self.serial_port = None
         self.connected = False
         self._set_state(DeviceState.DISCONNECTED)
-        self.notify(
-            f"{self.config.name} disconnected",
-            "warning",
-        )
+        was_connected = self.connected
+        if was_connected:
+            self.notify(
+                f"{self.config.name} disconnected",
+                "warning",
+            )
 
     def start(self) -> None:
         snapshot = self.snapshot()
@@ -232,7 +234,7 @@ class StreamingSerialRuntime(AbstractDevice):
 
         if path is not None:
             self.notify(
-                f"Serial data saved: {_relative_data_path(path)}",
+                f"Serial CSV: {_relative_data_path(path)}",
                 "success",
             )
         return path
@@ -689,7 +691,7 @@ class DeviceManagerDialog(QDialog):
         self.refresh()
 
     def _tick(self) -> None:
-        saving = bool(getattr(self.app, "save_bool", False))
+        saving = (hasattr(self.app, "engine") and self.app.engine.saving)
         prefix = getattr(self.app, "common_path", None)
         save_begin = getattr(self.app, "save_begin_time", time.time())
         elapsed_origin = time.monotonic() - max(0.0, time.time() - save_begin)

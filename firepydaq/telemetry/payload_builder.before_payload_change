@@ -1,0 +1,90 @@
+"""Adapters that convert FirePyDAQ engine/device data into MQTT contracts."""
+from __future__ import annotations
+
+from typing import Any, Mapping, Sequence
+
+
+class MqttPayloadBuilder:
+    """Pure payload builder reusable by MQTT and a future internal dashboard."""
+
+    @staticmethod
+    def metadata(
+        *,
+        settings: Mapping[str, Any],
+        ni_labels: Sequence[str],
+        ni_units: Mapping[str, str] | None,
+        snapshots: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+        experiment = {
+            "name": settings.get("Experiment Name"),
+            "test_name": settings.get("Test Name"),
+            "operator": settings.get("Name"),
+            "experiment_type": settings.get("Experiment Type"),
+            "sample_rate_hz": settings.get("Sampling Rate"),
+        }
+        channels: dict[str, dict[str, Any]] = {}
+        units = ni_units or {}
+        for label in ni_labels:
+            channels[str(label)] = {
+                "source": "NI",
+                "device": "NI Task",
+                "unit": units.get(str(label), ""),
+            }
+        for device_name, snapshot in snapshots.items():
+            values = getattr(snapshot, "values", {}) or {}
+            snapshot_units = getattr(snapshot, "units", {}) or {}
+            device_type = getattr(snapshot, "device_type", "unknown")
+            for field_name in values:
+                channel = MqttPayloadBuilder.serial_channel_name(
+                    str(device_name), str(field_name)
+                )
+                channels[channel] = {
+                    "source": str(device_type),
+                    "device": str(device_name),
+                    "field": str(field_name),
+                    "unit": snapshot_units.get(field_name, ""),
+                }
+        return experiment, channels
+
+    @staticmethod
+    def live_values(
+        *,
+        ni_labels: Sequence[str],
+        ni_values,
+        snapshots: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        if ni_values is not None:
+            # MQTT publishes the latest sample in the current NI hardware block.
+            for index, label in enumerate(ni_labels):
+                try:
+                    channel_values = ni_values[index]
+                    try:
+                        values[str(label)] = channel_values[-1]
+                    except (TypeError, IndexError):
+                        values[str(label)] = channel_values
+                except (IndexError, TypeError):
+                    break
+        for device_name, snapshot in snapshots.items():
+            snapshot_values = getattr(snapshot, "values", {}) or {}
+            for field_name, value in snapshot_values.items():
+                values[MqttPayloadBuilder.serial_channel_name(
+                    str(device_name), str(field_name)
+                )] = value
+        return values
+
+    @staticmethod
+    def health(snapshots: Mapping[str, Any]) -> dict[str, Any]:
+        devices: dict[str, Any] = {}
+        for name, snapshot in snapshots.items():
+            if hasattr(snapshot, "to_dict"):
+                devices[str(name)] = snapshot.to_dict()
+            elif hasattr(snapshot, "__dict__"):
+                devices[str(name)] = dict(snapshot.__dict__)
+            else:
+                devices[str(name)] = snapshot
+        return devices
+
+    @staticmethod
+    def serial_channel_name(device_name: str, field_name: str) -> str:
+        return f"{device_name}.{field_name}"

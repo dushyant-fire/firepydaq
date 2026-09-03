@@ -19,13 +19,13 @@ class AlicatDevice(AbstractDevice):
         name: str,
         port: str,
         gas: str,
-        poll_interval_s: float = 0.2,
+        poll_interval_s: float = 0.5,
         notify: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         super().__init__(name=name, device_type="alicat")
         self.port = port
         self.gas = gas
-        self.poll_interval_s = max(float(poll_interval_s), 0.05)
+        self.poll_interval_s = max(float(poll_interval_s), 0.1)
         self.notify = notify
 
         self._io_lock = threading.RLock()
@@ -115,6 +115,12 @@ class AlicatDevice(AbstractDevice):
             self._set_state(DeviceState.CONNECTED)
 
     def set_flow(self, flow_rate: float) -> None:
+        print(
+            "SET:",
+            self.name,
+            flow_rate,
+            time.time(),
+        )
         with self._io_lock:
             loop, controller = self._require_transport_locked()
             loop.run_until_complete(
@@ -147,9 +153,12 @@ class AlicatDevice(AbstractDevice):
             except Exception as exc:
                 if self._stop_event.is_set():
                     return
-                self._set_error(exc)
+                print(
+                    "ALICAT EXCEPTION:",
+                    repr(exc)
+                )
                 self._notify(f"{self.name} read error: {exc}", "warning")
-                return
+                continue
 
             next_read = max(
                 next_read + self.poll_interval_s,
